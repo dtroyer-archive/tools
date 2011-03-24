@@ -1,0 +1,477 @@
+#!/usr/bin/perl -w
+# syscfgdiff - Create a snapshot of a system's dynamic configuration data
+# $Id: syscfgdiff 262 2007-09-10 10:40:33Z curteag $
+#
+# Originally Gabriel Curteanu's syscheck.pl
+
+use Data::Dumper;
+use Getopt::Std;
+use strict;
+use filetest 'access';
+
+sub diff {
+	my ($str1,$str2) = ($_[0], $_[1]);
+	my ($tmp1,$tmp2,$fh);
+
+	use IO::File;
+	use POSIX qw(tmpnam);
+
+	# try new temporary filenames until we get one that didn't already exist
+	do { $tmp1 = tmpnam() }
+		until $fh = IO::File->new($tmp1, O_RDWR|O_CREAT|O_EXCL);
+	print $fh $str1;
+	$fh->close;
+
+	do { $tmp2 = tmpnam() }
+		until $fh = IO::File->new($tmp2, O_RDWR|O_CREAT|O_EXCL);
+	print $fh $str2;
+	$fh->close;
+
+	my $output = `diff -uw $tmp1 $tmp2`;
+	unlink($tmp1);
+	unlink($tmp2);
+	return $output;
+}
+
+
+sub interface_data {
+	my ($hashref, $ifname) = ($_[0], $_[1]);
+
+	my $result = `ethtool $ifname 2>/dev/null`;
+	my $miiresult = `mii-tool $ifname 2>/dev/null`;
+
+	$$hashref{"network"}{"interfaces"}{"$ifname"}{"ethtool"} = $result;
+	$$hashref{"network"}{"interfaces"}{"$ifname"}{"miitool"} = $miiresult;
+}	
+
+
+sub network_status {
+    my $hashref = $_[0];
+
+    open (NETDEV, "/proc/net/dev");
+    while(<NETDEV>)
+    {
+	    if (!/^\s*(\w+):/) { next; }
+	    interface_data ($hashref, $1);
+    }
+    close(NETDEV);
+
+    my $ifconfig_data = `ifconfig -a | egrep -v -e "(RX|TX) (packets|bytes)" -e "collisions" 2> /dev/null`;
+    $$hashref{"network"}{"ifconfig"} = $ifconfig_data;
+
+    my $route_data = `route -n | egrep -v -e "(Destination|Kernel)" | sort -nr`;
+    $$hashref{"network"}{"routes"} = $route_data;
+
+    my $open_ports = `netstat -tunl | tail -n +3 | sort`;
+
+    $$hashref{"network"}{"ports"} = $open_ports;
+}
+
+###
+### Parses output from "powermt display" and loads the hash (full tree given)
+###
+sub powerpath_standard {
+    my ($hashref) = $_[0];
+
+    my $text = `powermt display`;
+
+    my @records = split (/={2,}\n/, $text);
+
+    for (my $i = 0; $i <= $#records; $i++) {
+
+	if ($records[$i] =~ /^\s+\d+/) {
+
+	    #clear "Errors" column
+	    my @rec_lines = split("\n", $records[$i]);
+
+	    for (my $lineno = 0; $lineno <= $#rec_lines; $lineno++) {
+
+		$rec_lines[$lineno] =~ s/(\w+|-)\s+(\w+|-)\s+\d+$/(del by script)/;
+	    }
+
+	    #now sort the list
+	    my $final_lines = join("\n", sort {$a cmp $b} @rec_lines);
+
+	    $records[$i] = $final_lines;
+	}
+    }
+
+    my $newtext = join("==============================================================================\n", @records)."\n";
+
+    #loads the data in tree
+    $$hashref{"disks"}{"ppath"}{"summary"} = $newtext;
+}
+
+###
+### Parses output from "powermt display ports" and loads the hash (full tree given)
+###
+sub powerpath_ports {
+    my $hashref = $_[0];
+
+    my $text = `powermt display ports`;
+
+    my @records = split (/={2,}\n/, $text);
+
+    ### Record: 1 - Storage class 2 - headers 3 - entries(if any)
+    ###
+    ###
+    for (my $i = 0; $i <= $#records; $i++) {
+
+	next if ($records[$i] =~ /^\s*Storage/); ### storage class
+	next if ($records[$i] =~ /^--+/); ### headers
+
+	### valid record by exclusion
+
+	#clear "Q-IO & Errors" columns
+	my @rec_lines = split("\n", $records[$i]);
+
+	for (my $lineno = 0; $lineno <= $#rec_lines; $lineno++) {
+
+	    $rec_lines[$lineno] =~ s/\s+(\w+|-)\s+\d+$/   (del by script)/; ### erase  Q-IO and errors, preserve dead
+	}
+
+	#now sort the list
+	my $final_lines = join("\n", sort {$a cmp $b} @rec_lines);
+
+	$records[$i] = $final_lines;
+    }
+
+    my $newtext = join("==============================================================================\n", @records)."\n";
+
+    #loads the data in tree
+    $$hashref{"disks"}{"ppath"}{"ports"} = $newtext;
+}
+
+###
+### Parses output from "powermt display paths" and loads the hash (full tree given)
+###
+sub powerpath_paths {
+    my $hashref = $_[0];
+
+    my $text = `powermt display paths`;
+
+    my @records = split (/={2,}\n/, $text);
+
+    ### Record: 1 - class and device count 2 - headers 3 - entries(if any)
+    ###
+    ###
+    for (my $i = 0; $i <= $#records; $i++) {
+
+	next if ($records[$i] =~ /logical device count/); ### storage class and device count
+	next if ($records[$i] =~ /^--+/); ### headers
+
+	### valid record by exclusion
+
+	my @rec_lines = split("\n", $records[$i]);
+
+	#now sort the list
+	my $final_lines = join("\n", sort {$a cmp $b} @rec_lines);
+
+	$records[$i] = $final_lines;
+    }
+
+    my $newtext = join("==============================================================================\n", @records)."\n";
+
+    #loads the data in tree
+    $$hashref{"disks"}{"ppath"}{"paths"} = $newtext;
+}
+
+###
+### Parses output from "powermt display dev=all" and loads the hash (full tree given)
+###
+sub powerpath_devices {
+    my $hashref = $_[0];
+
+    my $text = `powermt display dev=all`;
+
+    my @devices = split (/\n\n/, $text); ### devices separated by blank line
+
+    for (my $deviceno = 0; $deviceno <= $#devices; $deviceno++) {
+
+	my @records = split (/={2,}\n/, $devices[$deviceno]);
+
+    	### Record: 1 - device details 2 - headers 3 - entries(if any)
+	###
+	###
+	for (my $i = 0; $i <= $#records; $i++) {
+
+	    if ($records[$i] =~ /^\s+\d+/) {
+
+		### valid record
+
+		#clear "Q-IO & Errors" columns
+		my @rec_lines = split("\n", $records[$i]);
+
+		for (my $lineno = 0; $lineno <= $#rec_lines; $lineno++) {
+
+		    $rec_lines[$lineno] =~ s/\s+(\w+|-)\s+\d+$/  (del by script)/;
+		    $rec_lines[$lineno] =~ s/(\s+)sd\w+\s+/$1<removed>  /;
+		}
+
+		#now sort the list
+		my $final_lines = join("\n", sort {$a cmp $b} @rec_lines);
+
+		$records[$i] = $final_lines;
+	    }
+	} ###endfor records
+
+	$devices[$deviceno] = join("==============================================================================\n", @records)."\n";
+
+    } ###endfor devices
+
+    my $newtext = join ("\n\n", @devices);
+
+    #loads the data in tree
+    $$hashref{"disks"}{"ppath"}{"devices"} = $newtext;
+}
+
+
+###
+### Loads the data related to storage
+###
+### For now:
+###   - LVM
+###   - PowerPath
+###   - md devices
+###   - basic disk config (partitions, multipath)
+###
+sub disks_status{
+    my $hashref = $_[0];
+
+    my $proc_partitions = `cat /proc/partitions | tail -n +3 | awk '{printf("%-32s : %-16s (%3s:%-3s)\\n",\$4,\$3,\$1,\$2)}' | sort`;
+    $$hashref{"disks"}{"partitions"} = $proc_partitions;
+
+    if ( -x "/usr/sbin/vgdisplay" ) {
+
+	my $lvm_conf = `vgdisplay -v 2> /dev/null`;
+	$$hashref{"disks"}{"lvmconfig"} = $lvm_conf;
+    }
+
+
+    if ( -x "/sbin/powermt") {
+
+	powerpath_standard ($hashref);
+
+	powerpath_ports ($hashref);
+
+	powerpath_paths ($hashref);
+
+	powerpath_devices ($hashref);
+    }
+
+    if ( -x "/sbin/multipath" ) {
+	my $mpath_status = `multipath -l`;
+	$$hashref{"disks"}{"multipath"} = $mpath_status;
+    }
+
+    my $md_stat = `cat /proc/mdstat`;
+    $$hashref{"disks"}{"mdstat"} = $md_stat;
+	
+}
+
+sub display_hash {
+	my ($hashref,$path,$hide_values) = @_;
+
+	foreach my $key (keys %{$hashref}) {
+		if (!$hide_values) {
+		    print "### $path/$key configuration:\n\n";
+		} else {
+		    print "### $path/$key\n";
+		}
+		if (ref($$hashref{$key}) eq "HASH") {
+			display_hash ($$hashref{$key}, $path."/".$key, $hide_values);
+		} else {
+		    print $$hashref{$key} if (!$hide_values);
+		}
+	}
+}
+
+# Checks if hash2 is identical to hash1. In order to determine if the number of entries is 
+# different, deletes the keys after checking
+#
+#
+sub compare_hash {
+
+	my ($hashref1, $hashref2, $keypath) = ($_[0], $_[1],$_[2]);
+
+	foreach my $key (keys %{$hashref1}) {
+		if (ref($$hashref1{$key}) eq "HASH") {
+			if (ref($$hashref2{$key}) eq "HASH") {
+				compare_hash ($$hashref1{$key},$$hashref2{$key},$keypath."/".$key);
+				#removes key
+				delete $$hashref1{$key};
+				delete $$hashref2{$key};
+				##print "Delete $key\n";
+			} else {
+				warn "Trees not identical, missing key $keypath/$key in second tree\n";
+			}
+		} else {
+			print "Checking $keypath/$key....";
+			#we have key in both, compare values.
+			#we ensure that values are defined, if not put a placeholder to trigger diff
+			if (!defined($$hashref1{$key})){
+				$$hashref1{$key} = "!!!Value not present!!!";
+			}
+			if (!defined($$hashref2{$key})){
+				$$hashref2{$key} = "!!!Value not present!!!";
+			}
+			if ($$hashref1{$key} eq $$hashref2{$key}) {
+				print "Identical\n";
+			} else {
+				print "!!!NOT IDENTICAL!!!\n";
+				print "===================\n";
+				print diff ($$hashref1{$key}, $$hashref2{$key});
+				print "===================\n";
+			}
+			#removes key
+			delete $$hashref1{$key};
+			delete $$hashref2{$key};
+			##print "Delete $key\n";
+
+		}
+	}
+}
+
+sub make_snapshot {
+	my $filename = shift (@_);
+	my %sysdata;
+
+	network_status(\%sysdata);
+	disks_status(\%sysdata);
+	##display_hash (\%sysdata);
+
+	$Data::Dumper::Purity = 1;
+	$Data::Dumper::Deepcopy = 1;
+	$Data::Dumper::Sortkeys = 1;
+
+	open(OUTFILE, ">$filename");
+	print OUTFILE Data::Dumper->Dump([\%sysdata]);
+	close OUTFILE;
+}
+
+sub load_snapshot {
+	my $filename = shift(@_);
+
+	my $newdata = do "$filename" or die "File $filename loading error\n";
+
+	return $newdata;
+}
+
+sub compare_snapshots {
+	my ($file1, $file2) = ($_[0], $_[1]);
+
+	my $snapshot1 = load_snapshot ($file1);
+	my $snapshot2 = load_snapshot ($file2);
+
+	compare_hash ($snapshot1, $snapshot2);
+
+	my $keys1 = scalar(values(%$snapshot1));
+	my $keys2 = scalar(values(%$snapshot2));
+
+	if ($keys1 != 0) {
+		print "Keys in $file1 not found in $file2\n";
+		print "Contents left in $file1 follows:\n";
+		display_hash ($snapshot1);
+	}
+
+	if ($keys2 != 0) {
+		print "Keys in $file2 not found in $file1\n";
+		print "Contents left in $file2 follows:\n";
+		display_hash ($snapshot2);
+	}
+
+}
+
+sub print_usage
+{
+        print "Usage:\
+        -g <filename> : generate snapshot in file\
+        -c <file1> <file2> : compare snapshot file1 with snapshot file2\
+        -h : help (this screen)\
+        -d <filename> <tree root>/<tree_entry>/... : display entry. If no entry given, display all tree\n";
+
+	exit 0;
+}
+
+my %opts = ();
+getopts('gchd', \%opts);
+
+if ($opts{h}) {
+	print_usage ();
+
+	exit 0;
+}
+
+if ($opts{g}) {
+	die "Only one file name for -g" if ($#ARGV != 0);
+
+	make_snapshot ($ARGV[0]);
+
+	print "Done...\n";
+	
+	exit 0;
+}
+
+if ($opts{c}) {
+	die "Two file names for -c" if ($#ARGV != 1);
+
+	compare_snapshots ($ARGV[0],$ARGV[1]);
+
+	print "Done...\n";
+	
+	exit 0;
+}
+
+if ($opts{d}) {
+    my $snapshot;
+
+    if ( -f $ARGV[0] ){
+        $snapshot = load_snapshot ($ARGV[0]);
+    } else {
+	die "Invalid filename specified for loading. File not found\n";
+    }
+
+    # locate entry and display
+
+    my $hashrefroot = $snapshot;
+    my $keypath = "";
+    for (my $i = 1; $i <= $#ARGV; $i++){
+	
+	if (ref ($$hashrefroot{$ARGV[$i]}) eq "HASH") {
+	    
+	    #key indicates new hash root
+
+	    $hashrefroot = $$hashrefroot{$ARGV[$i]};
+	    $keypath .= "/" if ($keypath ne "");
+	    $keypath .= $ARGV[$i];
+	} else {
+	    
+	    #key is not present, or scalar/array?
+	    if (!defined ($$hashrefroot{$ARGV[$i]})) {
+		
+		print "Key $keypath/$ARGV[$i] is not present in file\n";
+		print "Available keys:\n";
+    		display_hash ($hashrefroot, $keypath, 1);
+		
+		exit 0;
+	    } else {
+		
+		#scalar value present, print as is
+		print "### $keypath/$ARGV[$i] configuration:\n\n";
+		print $$hashrefroot{$ARGV[$i]};
+
+		exit 0;
+	    }
+	}
+    }
+
+    display_hash ($hashrefroot, $keypath, 0);
+
+    exit (0);
+}
+
+
+#no switches
+print_usage ();
+
+exit 1;

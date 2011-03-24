@@ -1,0 +1,143 @@
+#!/bin/sh
+    if [ -z "$xSH" ]; then xSH=`which ksh 2>/dev/null`; export xSH; fi
+    if [ -z "$xSH" ]; then xSH=`which bash 2>/dev/null`; export xSH; fi
+    if [ ! -z "$xSH" -a -z "$xxxx" ]; then xxxx=1; export xxxx; eval 'exec $xSH $0 "$@"'; fi
+
+# rxt [-d xx:0] [-l username] [-f fgcolor] [-b bgcolor] host [cmd line]
+# $Id: rxt 5 2006-03-21 21:04:39Z troyerdl $
+# 'The Sprint version'
+#
+# rxt [-d display] [-f font] [-b bgcolor] [-l login]
+# -d display    Set X11 display
+# -f font       Set screen font
+# -b bgcolor    Set background color
+# -l login      Set login name
+#
+# Uses a config file ~/etc/rxt.conf
+# host-pattern|fgcolor|bgcolor|command|remote-X|namelookup
+# bugs|"#99ffff"|black||1|no
+
+# Set defaults
+
+ROOT=$HOME
+
+CFGFILE=$ROOT/etc/rxt.conf
+LOOKUPHOST=`grep "^lookuphost" $CFGFILE`
+if [ ! -z "$LOOKUPHOST" ]; then
+	LOOKUPHOST=`echo $LOOKUPHOST | cut -d"|" -f2`
+fi
+
+XTERM=`which xterm`
+if [ -x /usr/contrib/bin/X11/xterm ]; then
+    XTERM="/usr/contrib/bin/X11/xterm"
+fi
+FONT=${RXTFONT:-hp8.7x10}
+FONT=${RXTFONT:-8x13}
+GEO="-geometry 80x25+40+40"
+SSH="ssh"
+LOOKUPCMD="wget -qO -"
+NMBLOOKUP="nmblookup -R -U 208.10.65.100"
+
+# Can't remember why I wanted to do this...
+if [ "$DISPLAY" = "" ]; then
+	DISP=""
+else
+	DISP="-display $DISPLAY"
+fi
+#if [ "$DISPLAY" = ":0.0" ]; then
+#	DISP="-display `hostname`:0"
+#fi
+
+while getopts d:f:l:s:x c; do
+	case $c in
+		b)	BGCOLOR=$OPTARG
+			;;
+		d)	DISP="-display $OPTARG"
+			;;
+		f)	FONT="$OPTARG"
+			;;
+		l)	RUSER="-l $OPTARG"
+			;;
+		s)	STYLE="$OPTARG"
+			;;
+                x)      set -e
+                        set -x
+                        ;;
+	esac
+done
+shift `expr $OPTIND - 1`
+
+if [ "$1" = "" ]; then
+	HOST="`hostname`"
+else
+	HOST=$1; shift
+fi
+
+if [ "$STYLE" = "" ]; then
+	# default to hostname
+	STYLE=$HOST
+fi
+
+# Get defaults from config file
+CFG=`grep "^default" $CFGFILE`
+if [ "$CFG" != "" ]; then
+	DFGCOLOR=`echo $CFG | cut -d"|" -f2`
+	DBGCOLOR=`echo $CFG | cut -d"|" -f3`
+	DCMD=`echo $CFG | cut -d"|" -f4`
+	DREMX=`echo $CFG | cut -d"|" -f5`
+	DLOOKUP=`echo $CFG | cut -d"|" -f6`
+fi
+
+# Lookup host in config file
+CFG=`grep "^$STYLE|" $CFGFILE`
+if [ "$CFG" != "" ]; then
+	FGCOLOR=`echo $CFG | cut -d"|" -f2`
+	BGCOLOR=`echo $CFG | cut -d"|" -f3`
+	CMD=`echo $CFG | cut -d"|" -f4`
+	REMX=`echo $CFG | cut -d"|" -f5`
+	LOOKUP=`echo $CFG | cut -d"|" -f6`
+fi
+
+BGCOLOR=${BGCOLOR:=$DBGCOLOR}
+FGCOLOR=${FGCOLOR:=$DFGCOLOR}
+
+if [ "$CMD" = "" ]; then
+	CMD="$SSH $RUSER"
+fi
+
+# Resolve hostname ourselves
+if [ "${LOOKUP:=$DLOOKUP}" = "yes" -a "$OS" != "Windows_NT" ]; then
+        IP=`${NMBLOOKUP} ${HOST} | grep -v ^query | cut -f 1 -d ' '`
+        if [ "$IP" != "name_query" ]; then
+            HOST=$IP
+        else
+            IP=`${LOOKUPCMD} ${LOOKUPHOST}/${HOST}`
+            if [ $? = 0 -a  ! -z "$IP" ]; then
+                HOST=$IP
+            fi
+        fi
+fi
+
+# Build xterm command line
+XT="$XTERM $GEO -font $FONT -title $HOST -name $HOST -sb"
+
+if [ "$REMX" = "1" -o "$REMX" = "yes" ]; then
+	# Run xterm on remote host
+	X="$CMD $HOST $XT -fg '$FGCOLOR' -bg '$BGCOLOR' -ls $1 $2 $3 $4 $5 $6 $7 $8 $9"
+else
+	# Run xterm locally
+	X="$XT -fg $FGCOLOR -bg $BGCOLOR -ls -e $CMD $OPT $HOST $1 $2 $3 $4 $5 $6 $7 $8 $9"
+fi
+
+# Just do this if there's no X server
+if [ "$DISP" = "" ]; then
+	X="$CMD $HOST $1 $2 $3 $4 $5 $6 $7 $8 $9"
+fi
+
+# Or just this if it's local
+if [ "$HOST" = "" -o "$HOST" = "`hostname | cut -d"." -f 1`" ]; then
+	X="$XT -fg $FGCOLOR -bg $BGCOLOR -ls"
+fi
+
+#echo $X
+exec $X

@@ -1,0 +1,140 @@
+#!/bin/bash
+# config-su - Configure su
+# $Id: config-su 251 2007-08-02 22:21:43Z troyerdl $
+
+PROG=`basename $0`
+DIR=`dirname $0`
+USAGE_TEXT="
+$PROG - Configure PAM
+$PROG [-h] [-V]
+-V      Verify configuration changes
+
+su changes:
+- enable pam_wheel for root access
+"
+
+WHEEL_GROUP=wheel
+DEF_FILE=/etc/pam.d/su
+DEF_FILE=su
+DEF_MODE=644
+DEF_OWNER=root:root
+
+#=============================
+# Boilerplate functions
+SAVE_EXT=orig-config
+
+# save_orig_file makes a copy of the original file if it doesn't exist
+# save_orig_file filename
+save_orig_file() {
+    if [ ! -e $1.$SAVE_EXT ]; then
+        /bin/cp -p $1 $1.$SAVE_EXT
+    fi
+}
+
+# set_file owner mode filename [filename ...]
+set_file() {
+    OWNER=$1; shift
+    MODE=$1; shift
+    FILE="$@"
+
+    for i in $FILE; do
+        if [ ! -e $i ]; then
+            /bin/touch $i
+        fi
+    done
+
+    /bin/chown $OWNER $FILE
+    /bin/chmod $MODE $FILE
+}
+
+# test_file owner mode filename
+# Returns: 1=file not found, 2=wrong permissions
+test_file() {
+    RET=0
+    OWNER=$1; shift
+    MODE=$1; shift
+    FILE=$1
+
+    if [ ! -e $FILE ]; then
+        echo "$FILE not present"
+        RET=1
+    else
+        X=`stat -c "%a %U %G" $1`
+        set $X
+        if [ $1 != $MODE ]; then
+            echo "$FILE mode is $1, should be $MODE"
+            RET=2
+        fi
+        if [ "$2:$3" != $OWNER ]; then
+            echo "$FILE owner is $2:$3, should be $OWNER"
+            RET=2
+        fi
+    fi
+    return $RET
+}
+#=============================
+
+# Make the actual changes
+make_change() {
+    TMP_FILE=$DEF_FILE.tmp$$
+
+    save_orig_file $DEF_FILE
+    /bin/sed -e "
+        /^auth.*pam_wheel/d;
+        /^auth.*pam_stack/i auth       required     /lib/security/\$ISA/pam_wheel.so use_uid root_only group=wheel
+    " $DEF_FILE >$TMP_FILE
+    [ $? = 0 ] && /bin/mv $TMP_FILE $DEF_FILE
+    set_file $DEF_OWNER $DEF_MODE $DEF_FILE
+}
+
+# Test for changes
+test_config() {
+    RET=0
+
+    test_file $DEF_OWNER $DEF_MODE $DEF_FILE
+    [ $? != 0 ] && RET=1
+
+    if [ -n "`egrep '^auth.*pam_wheel' $DEF_FILE`" ]; then
+        if [ -z "`egrep \"^auth.*pam_wheel.*use_uid.*root_only\" $DEF_FILE`" ]; then
+            echo "pam_wheel configuration problem in $DEF_FILE"
+            RET=1
+        fi
+    else
+        echo "pam_wheel not enabled in $DEF_FILE"
+        RET=1
+    fi
+
+    return $RET
+}
+
+usage() {
+    echo $USAGE_TEXT
+}
+
+# Main processing
+
+VERIFY=0
+while getopts hV c; do
+    case $c in
+        h)      usage;
+                exit;
+                ;;
+    	V)	VERIFY=1
+        	;;
+    esac
+done
+shift `expr $OPTIND - 1`
+
+# Verify running as root
+if [ "$EUID" != 0 ]; then
+    echo "Must be root to run $PROG"
+    exit 1
+fi
+
+# Skip changes if this is a Verify run
+if [ "$VERIFY" != 1 ]; then
+    make_change
+fi
+
+test_config
+exit $?

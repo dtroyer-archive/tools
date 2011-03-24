@@ -1,0 +1,96 @@
+#!/bin/bash
+# ssh-mkkeys - Manage remote SSH keys
+# $Id: ssh-mkkeys 555 2009-07-09 16:51:09Z troyerdl $
+#
+# ssh-mkkeys [-f] [-h hostfile] [-g] [host ...]
+# -d            force DSA keys on remote (overrides -t)
+# -f            delete existing keys
+# -h hostfile	file of hostnames (default=none)
+# -g		only retrieve remote key file
+# -r            force RSA keys on remote (overrides -t)
+# -t keytype    specify local key type (dsa, rsa)
+# host		list host(s) on command-line
+
+SSHDIR=`dirname $0`
+
+# Set defaults
+KEYTYPE=rsa
+
+# Prevent root operation
+ID=`id | cut -f1 -d' ' | cut -f2 -d'(' | tr -d ')'`
+if [ $ID = "root" ]; then
+    echo "You cannot run this script as root"
+    exit
+fi
+
+GROUP=`id | cut -f2 -d' ' | cut -f2 -d'(' | tr -d ')'`
+HOMEDIR=`egrep ^$ID /etc/passwd | cut -f6 -d:`
+HOSTFILE=
+REMKEYTYPE=$KEYTYPE
+
+while getopts fgh:rt: c; do
+    case $c in
+        d)      REMKEYTYPE=dsa
+                KEYTYPE=dsa
+                ;;
+        f)	FORCE="-f"
+		;;
+	h)	HOSTFILE=$OPTARG
+		;;
+	g)	DOGET=1
+		;;
+        r)      REMKEYTYPE=rsa
+                KEYTYPE=rsa
+                ;;
+        t)      KEYTYPE=$OPTARG
+                ;;
+    esac
+done
+shift `expr $OPTIND - 1`
+
+# Build host list
+if [ "x${HOSTFILE}" != "x" -a -f "${HOSTFILE}" ]; then
+    HOSTS="`cat ${HOSTFILE}` $@"
+else
+    HOSTS="$@"
+fi
+
+if [ "$HOSTS" = "" ]; then
+    echo "No hosts found to process"
+    exit
+fi
+
+# Expand host group names
+ALLHOSTS="$HOSTS"
+
+# Read our public key
+MYPUB=`cat ${HOMEDIR}/.ssh/id_${KEYTYPE}.pub`
+MYPUBID=`cat ${HOMEDIR}/.ssh/id_${KEYTYPE}.pub | cut -f3 -d' '`
+
+for i in ${ALLHOSTS}; do
+    if [ "$DOGET" = "" ]; then
+	# Add this host to the remote authorized_keys file
+	ssh ${SSH_OPTS} $i "if [ ! -d \${HOME}/.ssh ]; then \
+	    	    mkdir \${HOME}/.ssh; \
+    	    	fi; \
+		if [ -r \${HOME}/.ssh/authorized_keys ]; then \
+			grep -v $MYPUBID \${HOME}/.ssh/authorized_keys >\${HOME}/.ssh/authorized_keys.tmp; \
+			mv \${HOME}/.ssh/authorized_keys.tmp \${HOME}/.ssh/authorized_keys; \
+		fi; \
+		echo $MYPUB >>\${HOME}/.ssh/authorized_keys; \
+                chmod go-w \${HOME}/.ssh; \
+                chmod go-w \${HOME}/.ssh/authorized_keys; \
+                "
+	echo "Sending ssh-conf script to" $i 
+	scp -p ${SSHDIR}/ssh-conf $i:/tmp/ssh-conf-$$
+	echo "Executing ssh-conf script on" $i 
+	ssh $i "/tmp/ssh-conf-$$ ${FORCE} -t ${REMKEYTYPE:-dsa}"
+    fi
+    echo "Getting ssh ${REMKEYTYPE} key from $i"
+    if [ ! -d ${HOMEDIR}/.ssh/keys ]; then \
+        mkdir ${HOMEDIR}/.ssh/keys; \
+    fi
+    scp -p $i:.ssh/id_${REMKEYTYPE}.pub ${HOMEDIR}/.ssh/keys/$i\_${REMKEYTYPE}.pub
+done
+
+echo "Done"

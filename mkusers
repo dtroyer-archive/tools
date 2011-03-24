@@ -1,0 +1,136 @@
+#!/usr/bin/perl -w
+# mkusers - create Linux users from passwd-like entries
+# $Id: mkusers 109 2006-09-14 21:12:52Z troyerdl $
+#
+# mkusers [-u user-list] [-g group-list]
+#  -u user-list     specifies file containing passwd entries
+#  -g group-list    specifies file containing group entries
+#
+# Note: group memberships not yet implemented for /etc/groups
+
+use Getopt::Std;
+
+my $version = q{ $Revision: 1.1.1.1 $ };
+$version =~ s/^[^0-9]+([0-9.]+).*$/$1/;
+
+my %opts = ();
+getopts('g:u:x', \%opts);
+
+$GroupAdd = '/usr/sbin/groupadd';
+$UserAdd = '/usr/sbin/useradd';
+#$UserMod = '/usr/sbin/usermod';
+$ID = '/usr/bin/id';
+
+my $GroupFile = $opts{'g'} || "";
+my $UserFile  = $opts{'u'} || "";
+
+if ($GroupFile) {
+    if ($GroupFile eq "-") {
+        *GROUPS = *STDIN;
+    } else {
+        open(GROUPS, "<$GroupFile");
+    }
+    # process group list
+    while (<GROUPS>) {
+        chomp;
+        my @newgroup = parsegrent($_);
+        next if (! $newgroup[0]);
+        my @xist = getgrnam($newgroup[0]);
+        if (! @xist) {
+            # group doesn't exist
+            if (my @x = groupadd(@newgroup)) {
+                # show output from useradd
+                print @x;
+            }
+        } else {
+            # group exists, do nothing
+            print "Group $newgroup[0] exists, skipping\n";
+        }
+    }
+    close(GROUPS);
+}
+
+if ($UserFile) {
+    if ($UserFile eq "-") {
+        *USERS = *STDIN;
+    } else {
+        open(USERS, "<$UserFile");
+    }
+    # process user list
+    while (<USERS>) {
+        chomp;
+        my @newuser = parsepwent($_);
+        next if (! $newuser[0]);
+        my @xist = getpwnam($newuser[0]);
+        if (! @xist) {
+            # user doesn't exist
+            if (my @x = useradd(@newuser)) {
+                # show output from useradd
+                print @x;
+            }
+        } else {
+            # user exists, do nothing
+            print "User $newuser[0] exists, skipping\n";
+        }
+    }
+    close(USERS);
+}
+
+
+# Fini
+
+# $str = getgroups($user)
+# returns a comma-separated list of groups the user is a member of
+
+sub getgroups {
+    my $user = shift;
+    
+    my @x = `$ID -Gn $user 2>&1`;
+    $x[0] =~ /No such user/ ? "" : join(',', split(/\s+/, $x[0]));
+}  # getgroups
+
+# groupadd($groupname, $passwd, $gid, $members);
+
+sub groupadd {
+    my @g = @_;
+    my $pass = "";
+
+    # Add group
+    my @x = `$GroupAdd -g $g[2] $g[0]`;
+    @x;
+}  # groupadd
+
+# useradd($name, $passwd, $uid, $gid, $quota, $comment, $gcos, $dir, $shell, $extragroups);
+
+sub useradd {
+    my @u = @_;
+    my $pass = "";
+    my $xgroup = "";
+
+    if ($u[1] ne "x") {
+        $pass = "-p '$u[1]'";
+    }
+    if ($u[9]) {
+        $xgroup = "-G $u[9]";
+    }
+    my @x = `$UserAdd $pass -m -u $u[2] -c '$u[6]' -d $u[7] -s $u[8] $xgroup $u[0]`;
+}  # useradd
+
+# parsegrent returns an array from the passed group entry
+# ($name, $passwd, $gid, $members) = parsegrent($grline);
+
+sub parsegrent {
+    my $grent = shift;
+    my @g = split(/\:/, $grent);
+#    my @m = split(/\,/, $g[3]);
+    return ($g[0], $g[1], $g[2], $g[3]);
+}  # parsegrent
+
+# parsepwent returns an array from the passed passwd entry
+# ($name, $passwd, $uid, $gid, $quota, $comment, $gcos, $dir, $shell) = parsepwent($pwdline);
+
+sub parsepwent {
+    my $pwdent = shift;
+    my @u = split(/\:/, $pwdent);
+    return ($u[0], $u[1], $u[2], $u[3], "", "", $u[4], $u[5], $u[6], $u[7]);
+}  # parsepwent

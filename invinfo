@@ -1,0 +1,305 @@
+#!/bin/bash
+# invinfo - Get inventory information
+# $Id: invinfo 380 2008-04-24 13:47:30Z troyerdl $
+
+# Configuration
+
+PROG=`basename $0`
+HOST=`hostname`
+CFG=/usr/local/sysadm/etc/invinfo.conf
+
+TMPFILE="/tmp/$PROG.$$"
+
+# VMware ESX trigger
+PROCVMMEMCTL=/proc/vmmemctl
+
+DMIDECODE=/usr/sbin/dmidecode
+LSPCI=/sbin/lspci
+IP=/sbin/ip
+
+# CPUSPEED (MHz)
+# CPUVENDOR
+# NUMCPU
+
+GetCPUInfo() {
+    CPUSPEED=`sed -ne '/cpu MHz/s/.*: \(.*\)$/\1/p' /proc/cpuinfo | uniq`
+    CPUVENDOR=`sed -ne '/vendor_id/s/.*: \(.*\)$/\1/p' /proc/cpuinfo | uniq`
+    NUMCPU=`sed -ne '/processor/s/.*: \(.*\)$/\1/p' /proc/cpuinfo | wc -l | awk '{ print $1 }' `
+
+    echo "cpu_speed=$CPUSPEED" >$1.cpu
+    echo "cpu_vendor=$CPUVENDOR" >>$1.cpu
+    echo "cpu_num=$NUMCPU" >>$1.cpu
+}
+
+# DISKTOTAL (Gb)
+
+GetDiskInfo() {
+    DISKTOT=`df | grep '^/dev/' | awk 'BEGIN {$tot = 0 }; { $tot = $tot + $2 };END { print $tot/1024 }'`
+}
+
+GetDMIInfo() {
+    if [ -x $DMIDECODE -a $EUID = 0 ]; then
+	$DMIDECODE | awk '
+		BEGIN		{ }
+		/./		{ h = "" }
+		/DMI type 0,/,/DMI type 1,/ { h = "bios" }
+		/DMI type 1,/,/DMI type 2,/ { h = "system" }
+		/DMI type 2,/,/DMI type 3,/ { h = "baseboard" }
+		/DMI type 3,/,/DMI type 4,/ { h = "chassis" }
+		/DMI type 4,/,/DMI type 5,/ { h = "" }
+		/DMI type 5,/,/DMI type 6,/ { h = "" }
+		/Family/	{ if (h != "") { split($0,d,":"); print "dmi_" h "_Family=\"" gensub(/^ */,"","g",d[2]) "\"" } }
+		/Manufacturer/	{ if (h != "") { split($0,d,":"); print "dmi_" h "_Manufacturer=\"" gensub(/^ */,"","g",d[2]) "\"" } }
+		/Product/	{ if (h != "") { split($0,d,":"); print "dmi_" h "_Product=\"" gensub(/^ */,"","g",d[2]) "\"" } }
+		/Serial Number/	{ if (h != "") { split($0,d,":"); print "dmi_" h "_SerialNo=\"" gensub(/^ */,"","g",d[2]) "\"" } }
+		/Type/		{ if (h != "") { split($0,d,":"); print "dmi_" h "_Type=\"" gensub(/^ */,"","g",d[2]) "\"" } }
+		/UUID/		{ if (h != "") { split($0,d,":"); print "dmi_" h "_UUID=\"" gensub(/^ */,"","g",d[2]) "\"" } }
+		/Vendor/	{ if (h == "system") { split($0,d,":"); print "dmi_" h "_Manufacturer=\"" gensub(/^ */,"","g",d[2]) "\"" } 
+				  else
+				  if (h != "") { split($0,d,":"); print "dmi_" h "_Vendor=\"" gensub(/^ */,"","g",d[2]) "\"" } }
+		/Version/	{ if (h != "") { split($0,d,":"); print "dmi_" h "_Version=\"" gensub(/^ */,"","g",d[2]) "\"" } }
+		END		{ }
+	' >$1.dmi
+    fi
+}
+
+# MEMTOTAL (Mb)
+
+GetMemoryInfo() {
+    MEMTOTAL=`sed -ne '/MemTotal:/s/.*: *\(.*\) kB$/\1/p' /proc/meminfo`
+}
+
+GetNetInfo() {
+    if [ -x $IP ]; then
+	$IP addr | awk '
+		BEGIN		{ ifc = "" ; ipv4 = "" }
+		/^[0-9]:/	{ 
+				  if (ipv4 != "")
+				    print "net_" ifc "=" ipv4 "," mac "," state ;
+				  split($2,d,":"); ifc = d[1]; flags = $3; ipv4 = ""; state = ""; mac = "";
+				}
+		/link\//	{ mac = $2 }
+		/inet /		{ ipv4 = $2; }
+		$3 ~ /UP/	{ state = "UP" }
+		END		{
+				  if (ipv4 != "")
+				    print "net_" ifc "=" ipv4 "," mac "," state "\n";
+				}
+	' >$1.net
+    fi
+}
+
+# DEFAULTGW
+# PRIMARYIF
+# Assume IP of interface wih default route is the primary
+
+GetRouteInfo() {
+    awk '
+	function decodeHex(str) {
+		hexdigs = "123456789abcdef"
+		code1 = substr(str, 1, 1) # first hex digit
+		code2 = substr(str, 2, 1) # second hex digit
+		code1 = tolower(code1)
+		code2 = tolower(code2)
+		val = index(hexdigs, code1) * 16 \
+			+ index(hexdigs, code2)
+		return val
+	}
+
+	BEGIN	{ defif = ""; gw = "" }
+        /Iface/	{ }
+	/./	{
+		  if ($2 == "00000000") {
+		    defif = $1;
+		    a4 = decodeHex(substr($3,1,2));
+		    a3 = decodeHex(substr($3,3,2));
+		    a2 = decodeHex(substr($3,5,2));
+		    a1 = decodeHex(substr($3,7,2));
+		  }
+		}
+	END	{
+		  printf "net_defaultgw=%d.%d.%d.%d\n", a1, a2, a3, a4;
+		  print "net_primaryif=" defif;
+		}
+    ' /proc/net/route >$1.route
+}
+
+GetOSInfo() {
+    # Figure out which vedor we are
+    for r in RedHat CentOS Fedora; do
+        VENDORPKG="`echo $r | tr [:upper:] [:lower:]`-release"
+        VENDORNAME=$r
+        RELEASE=`rpm -q --queryformat '%{VERSION}' $VENDORPKG`
+        if [ $? = 0 ]; then
+            break
+        fi
+        VENDORNAME=""
+    done
+    # Get update level
+    if [ -n "`grep Update /etc/redhat-release`" ]; then
+        # Get update
+        UPDATE=`cat /etc/redhat-release | sed s/.*Update\ // | sed s/\)$//`
+    else
+        # Assume update 0
+        UPDATE=0
+    fi
+
+    echo "os_vendor=$VENDORNAME" >$1.os
+    echo "os_release=$RELEASE" >>$1.os
+    if [ -n "$UPDATE" ]; then
+        echo "os_version=$UPDATE" >>$1.os
+    fi
+}
+
+GetPCIInfo() {
+#    CPUVENDOR=`sed -ne '/vendor_id/s/.*: \(.*\)$/\1/p' /proc/cpuinfo | uniq`
+    if [ ! -d /proc/bus/pci ]; then
+    	# Xen doesn't pretend to have a PCI bus
+    	return 1
+    fi
+    $LSPCI | sed -ne '
+	/Dell PowerEdge Expandable RAID/s/^.*ller \(.*\) (.*)$/pci_raid_perc=\1/p;t;
+	/Dell PowerEdge Expandable RAID/s/^.*ller \(.*\)$/pci_raid_perc=\1/p;
+	/Smart Array/s/^.*Smart Array \(.*\) (.*)/pci_raid_cciss=\1/p;
+
+	/Dell Embedded Remote Access or ERA/s/^.*ss or /pci_rcon_era=/p;
+	/Dell Remote Access Card III/s/^.*$/pci_rcon_drac=3\nrcon=DRAC3/p;
+	/Dell Embedded Remote Access: BMC/s/^.*Access: \(.*\) device/pci_rcon_bmc=\1/p;
+	/Integrated Lights Out Controller/s/^.*$/pci_rcon_ilo=1\nrcon=iLO/p;
+	/Advanced System Management/s/^.*$/pci_rcon_riloe=asm/p;
+
+	/NetXtreme BCM/s/^.*NetXtreme \(.*\) Gigabit.*$/pci_net_tg3=\1/p;
+	/NetXtreme II BCM/s/^.*NetXtreme II \(.*\) Gigabit.*$/pci_net_bnx2=\1/p;
+	/Advanced Micro Devices .*PCnet32/s/^.*AMD\] \(.*\) \[PC.*$/pci_net_pcnet32=\1/p;
+	/PRO\/Wireless/s/^.*Wireless \(.*\) Network.*$/pci_net_ipw=\1/p;
+	/Ethernet Pro/s/^.*tion \(.*\) \[Ether.*$/pci_net_epro=\1/p;
+
+	/Symbios Logic/s/^.*Symbios Logic \(.*\) PCI-X.*(.*)$/pci_scsi_lsi=\1/p;t;
+	/Symbios Logic/s/^.*Symbios Logic \(.*\) (.*)$/pci_scsi_lsi=\1/p;
+    ' >$1.pci
+    # pci.raid
+    # 04:08.1 RAID bus controller: Dell PowerEdge Expandable RAID Controller 3/Di (rev 01)
+    # 02:0e.0 RAID bus controller: Dell PowerEdge Expandable RAID controller 5i
+    # 01:03.0 RAID bus controller: Compaq Computer Corporation Smart Array 5i/532 (rev 01)
+    # 02:02.0 RAID bus controller: Compaq Computer Corporation Smart Array 64xx (rev 01)
+
+    # pci.rcon
+    # 00:04.0 Class ff00: Dell Embedded Remote Access or ERA/O
+    # 00:04.1 Class ff00: Dell Remote Access Card III
+    # 00:04.2 Class ff00: Dell Embedded Remote Access: BMC/SMIC device
+    # 00:04.0 System peripheral: Compaq Computer Corporation Integrated Lights Out Controller (rev 01)
+    # 00:04.0 System peripheral: Compaq Computer Corporation Advanced System Management Controller
+
+    # pci.net
+    # 02:01.0 Ethernet controller: Broadcom Corporation NetXtreme BCM5703X Gigabit Ethernet (rev 02)
+    # 02:01.0 Ethernet controller: Broadcom Corporation NetXtreme BCM5703 Gigabit Ethernet (rev 10)
+    # 05:00.0 Ethernet controller: Broadcom Corporation NetXtreme II BCM5708 Gigabit Ethernet (rev 12)
+    # 00:12.0 Ethernet controller: Advanced Micro Devices [AMD] 79c970 [PCnet32 LANCE] (rev 10)
+    # 04:02.0 Network controller: Intel Corporation PRO/Wireless 2200BG Network Connection (rev 05)
+    # 00:02.0 Ethernet controller: Intel Corporation 82557/8/9 [Ethernet Pro 100] (rev 08)
+
+    # pci.scsi
+    # 00:01.0 RAID bus controller: LSI Logic / Symbios Logic 53C1510 (rev 02)
+    # 00:10.0 SCSI storage controller: LSI Logic / Symbios Logic 53c1030 PCI-X Fusion-MPT Dual Ultra320 SCSI (rev 01)
+
+}
+
+# MFG
+# SN
+# ASSET
+
+GetVMInfo() {
+    MFG="VMware"
+    SN="virtual"
+    ASSET="virtual"
+}
+
+GetXenInfo() {
+    MFG="Xen"
+    SN="virtual"
+    ASSET="virtual"
+}
+
+# Collect info
+
+if [ -f $CFG ]; then
+    # source the config file to set some defaults
+    . $CFG
+fi
+
+GetOSInfo $TMPFILE
+GetCPUInfo $TMPFILE
+GetDiskInfo
+GetMemoryInfo
+
+if [ -e $PROCVMMEMCTL ]; then
+    GetVMInfo
+fi
+
+if [ -d /sys/bus/xen/drivers/vif ]; then
+    # Xen DomU
+    GetXenInfo
+else
+    # We have real hardware to discover
+    GetDMIInfo $TMPFILE
+    . $TMPFILE.dmi
+fi
+
+MFG=${MFG:-$dmi_system_Manufacturer}
+MFG=${MFG:-$dmi_baseboard_Manufacturer}
+# Normalize MFG
+MFG=`echo $MFG | sed -ne '
+	/Dell/s/^.*$/Dell/;
+	/HP/s/^.*$/HP/;
+	/Hewlett Packard/s/^.*$/HP/;
+	p;
+'`
+
+SN=${SN:-$dmi_system_SerialNo}
+
+GetPCIInfo $TMPFILE
+. $TMPFILE.pci
+
+# Hack to check for 2950/DRAC5
+if [ "$dmi_system_Product" = "PowerEdge 2950" ]; then
+	rcon=DRAC5
+	echo "rcon=$rcon"
+fi
+
+echo "hostname=`hostname`"
+
+
+echo "memtotal=$MEMTOTAL"
+echo "disktot=$DISKTOT"
+
+# Show the hard-coded defaults if they have been set
+if [ -n "$MFG" ]; then
+    echo "mfg=\"$MFG\""
+fi
+
+if [ -n "$PART" ]; then
+    echo "part=$PART"
+fi
+
+if [ -n "$SN" ]; then
+    echo "sn=$SN"
+fi
+
+if [ -n "$ASSET" ]; then
+    echo "asset=$ASSET"
+fi
+
+if [ -n "$UUID" ]; then
+    echo "uuid=$UUID"
+fi
+
+GetNetInfo $TMPFILE
+GetRouteInfo $TMPFILE
+
+# Show cached output
+for i in os cpu dmi pci net route; do
+    [ -r $TMPFILE.$i ] && cat $TMPFILE.$i
+done
+
+# Clean up after ourselves
+rm $TMPFILE.*

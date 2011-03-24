@@ -1,0 +1,71 @@
+#!/bin/bash
+# ssh-conf - Configure SSH and generate keys
+# $Id: ssh-conf 109 2006-09-14 21:12:52Z troyerdl $
+#
+# ssh-conf [-f] [-t type]
+# -f	        removes existing keys
+# -t keytype    specify key type (dsa, rsa)
+#
+# Create ssh environment and generate an ssh key
+# for the user account.
+# - create $HOME/.ssh if it does not exist
+# - remove $HOME/.ssh/id_* if -f
+# - verify permissions on $HOME and $HOME/.ssh
+# - generate key pair with no passphrase
+
+# Set defaults
+KEYTYPE=rsa
+SSH=`which ssh`
+HOSTNAMECMD=`which hostname`
+
+# Verify location of ssh
+if [ ! -z "$SSH" ]; then
+    SSHROOT=`dirname $SSH`/..
+else
+    SSHROOT=/usr/local
+fi
+
+# Prevent root operation
+ID=`id | cut -f1 -d' ' | cut -f2 -d'(' | tr -d ')'`
+if [ $ID = "root" ]; then
+    echo "You cannot run this script as root"
+    exit
+fi
+
+GROUP=`id | cut -f2 -d' ' | cut -f2 -d'(' | tr -d ')'`
+HOST=${HOSTNAME-`$HOSTNAMECMD`}
+HOMEDIR=${HOME=`egrep ^$ID /etc/passwd | cut -f6 -d:`}
+
+while getopts ft: c; do
+    case $c in
+        f)  FORCE=1
+            ;;
+        t)  KEYTYPE=$OPTARG
+            ;;
+    esac
+done
+shift `expr $OPTIND - 1`
+
+if [ ! -d ${HOMEDIR}/.ssh ]; then
+    mkdir ${HOMEDIR}/.ssh
+fi
+chown -R $ID:$GROUP ${HOMEDIR}/.ssh
+chmod 700 ${HOMEDIR}/.ssh
+chmod 750 ${HOMEDIR}
+
+if [ "${FORCE}" ]; then
+    rm -f ${HOMEDIR}/.ssh/id_${KEYTYPE}* ${HOMEDIR}/.ssh/${HOST}_${KEYTYPE}.pub
+fi
+
+if [ "${FORCE}" -o ! -r ${HOMEDIR}/.ssh/id_${KEYTYPE} ]; then
+    echo "Generating ${KEYTYPE} key"
+    ${SSHROOT}/bin/ssh-keygen -t ${KEYTYPE} -N '' -b 1024 -f ${HOMEDIR}/.ssh/id_${KEYTYPE} 
+    echo "${KEYTYPE} key created for ${ID}\n\n"
+    chown -R $ID:$GROUP ${HOMEDIR}/.ssh/*
+fi
+
+if [ "${FORCE}" -o ! -r ${HOMEDIR}/.ssh/${HOST}_${KEYTYPE}.pub ]; then
+    cp -p ${HOMEDIR}/.ssh/id_${KEYTYPE}.pub ${HOMEDIR}/.ssh/${HOST}_${KEYTYPE}.pub
+fi
+
+echo "Done"

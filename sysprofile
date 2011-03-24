@@ -1,0 +1,300 @@
+#!/usr/bin/perl -w
+# sysprofile - Gather information for completing profile documents
+# $Id: sysprofile 109 2006-09-14 21:12:52Z troyerdl $
+
+# Information collected:
+# - hardware: CPU, RAM
+# - network: NICs, IP, gateway
+# - filesystems: mounts and sizes
+# - swap: device, size
+
+use Getopt::Std;
+
+my $version = q{ $Revision: 1.2 $ };
+$version =~ s/^[^0-9]+([0-9.]+).*$/$1/;
+
+my %opts = ();
+getopts('hw', \%opts);
+
+my $prog;
+$prog = `/bin/basename $0`;
+chop($prog);
+if ($opts{'h'}) {
+        print <<EOF_HELP;
+$prog - Display project profile information
+EOF_HELP
+        exit;
+}
+
+# Set up HTML output
+my ($outbegin,$outfs,$outend,$outpre,$outpost);
+if ($opts{'w'}) {
+    $outbegin = "<tr><td>";
+    $outend = "</td></tr>";
+    $outfs = "</td><td>";
+    $outpre = "<table>";
+    $outpost = "</table>";
+} else {
+    $outbegin = "";
+    $outend = "";
+    $outfs = ",";
+    $outpre = "";
+    $outpost = "";
+}
+
+my %HW = get_Hardware_Info();
+print "\nHardware\n";
+print " CPU: ",$HW{'numcpu'}," x ",$HW{'cpuspeed'}," ",$HW{'cpuprod'},"\n";
+print " RAM: ",$HW{'memory'},"\n";
+
+if (isEgenera()) {
+    my %Egenera = get_Egenera_Info();
+    print " Slot: ",$Egenera{'slot'},"\n";
+    print " Part number: ",$Egenera{'part'},"\n";
+    print " Serial number: ",$Egenera{'sn'},"\n";
+#    print " RAM: ",$Egenera{'memory'},"\n";
+#    print " CPU: ",$Egenera{'numcpu'}," x ",$Egenera{'cpuspeed'}," ",$Egenera{'cpuprod'},"\n";
+}
+
+my @Net = get_Network_Info();
+$outpre = "interface${outfs}addr${outfs}netmasklen${outfs}gateway";
+print "\nNetwork\n$outpre\n";
+foreach my $n (@Net) {
+    print $outbegin,
+        $n->{'name'},$outfs,
+        $n->{'ip'},$outfs,
+        $n->{'mask'},$outfs,
+        $n->{'gw'},$outend,"\n";
+}
+
+my @FS = get_Filesystems();
+$outpre = "mount${outfs}device${outfs}size";
+print "\nFilesystems\n$outpre\n";
+foreach $fs (@FS) {
+    print $outbegin,
+        $fs->{'file'},$outfs,
+        $fs->{'mount'},$outfs,
+        $fs->{'size'},$outend,"\n";
+}
+print $outpost,"\n";
+
+my %Swap = get_Swap_Info();
+$outpre = "device${outfs}size";
+print "\nSwap\n$outpre\n";
+foreach $s (sort keys %Swap) {
+    print $outbegin,$s,$outfs,$Swap{$s},$outend,"\n";
+}
+print $outpost,"\n";
+
+
+print "Fini\n";
+
+sub get_Egenera_Info {
+    my %E;
+    my @l;
+    my $proc = '/proc/egenera';
+
+    @l = read_file("$proc/ipmi/node/this/name");
+    $E{'slot'} = $l[0];
+
+    @l = read_file("$proc/ipmi/node/this/fru/0/product");
+    grep {
+        my @d = split(/=/);
+        if ($d[0] eq 'part') { $E{'part'} = $d[1]; }
+        if ($d[0] eq 'serial')   { $E{'sn'}   = $d[1]; }
+    } @l;
+
+    @l = read_file("$proc/ipmi/node/this/fru/0/chassis");
+    grep {
+        my @d = split(/=/);
+        if ($d[0] eq 'memory size') { $E{'memory'} = $d[1]; }
+        if ($d[0] eq 'number cpus') { $E{'numcpu'} = $d[1]; }
+        if ($d[0] eq 'cpu product') { $E{'cpuprod'}   = $d[1]; }
+        if ($d[0] eq 'cpu clock speed') { $E{'cpuspeed'}   = $d[1]; }
+    } @l;
+
+    %E;
+}  # get_Egenera_Info
+
+# get_Filesystems() returns an array of hashrefs all standard mounted 
+# filesystems listed in /etc/fstab by mountpoint
+
+sub get_Filesystems {
+    my @FS = ();
+
+    # Read /etc/fstab
+    # Keys are from the fstab struct in fstab.h:
+    # - spec: block special device
+    # - file: filesystem mount point
+    # - vfstype: filesystem type
+    # - mntopts: mount options
+    # - freq: dump frequency
+    # - passno: fsck pass order
+    my @FSTAB;
+    open(IN, "</etc/fstab") || return @FS;
+    while (<IN>) {
+        chomp;
+        next if (/^\#/);
+        # LABEL=/boot    /boot    ext3    defaults    1 2
+        if (/(\S+)\s+(\S+)\s+(\w+)\s+(\w+)\s+(\w+)\s+(\w+)/) {
+            my %fst;
+            $fst{'spec'}    = $1;
+            $fst{'file'}    = $2;
+            $fst{'vfstype'} = $3;
+            $fst{'mntopts'} = $4;
+            $fst{'freq'}    = $5;
+            $fst{'passno'}  = $6;
+            push(@FSTAB, \%fst);
+#            print "fstab: $2\n";
+        }
+    }
+    close(IN);
+
+    # Get mounted filesystems
+    my %MNT;
+    open(IN, "df -Ph |") || return @FS;
+    while (<IN>) {
+        chomp;
+        next if (/^Filesystem/);
+        next if (/none/);           # skip /proc, /dev/shm, etc.
+        # /dev/hda1    251M   29M  210M  13% /boot
+        if (/(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)/) {
+            my %m;
+            $m{'spec'} = $1;
+            $m{'size'} = $2;
+            $m{'used'} = $3;
+            $m{'avail'} = $4;
+            $m{'usepct'} = $5;
+            $m{'file'} = $6;
+            $MNT{$6} = \%m;
+#            print "df: $6\n";
+        }
+    }
+    close(IN);
+
+    # Build final table
+    foreach $fst (@FSTAB) {
+        my $f = $fst->{'file'};
+        next if (!$MNT{$f});
+        my $mnt = $MNT{$f};
+        my %fs;
+        $fs{'file'} = $f;
+        $fs{'type'} = $fst->{'vfstype'};
+        $fs{'mount'} = $mnt->{'spec'};
+        $fs{'size'} = $mnt->{'size'};
+        push(@FS, \%fs);
+    }
+    @FS;
+}  # get_Filesystems
+
+# %HW = get_Hardware_Info()
+
+sub get_Hardware_Info {
+    my %HW;
+    my @l;
+
+    @l = read_file("/proc/cpuinfo");
+    my $numcpu = 0;
+    grep {
+        /^(\w+ ?\w*)\s*:\s(.+)$/;
+        if ($1 eq 'processor') { $numcpu++; }
+        # adjust CPU speed to GHz and round to nearest .1GHz
+        if ($1 eq 'cpu MHz') { $HW{'cpuspeed'} = (int(($2 + 50) / 100) / 10) . "GHz"; }
+        if ($1 eq 'model name') { $2 =~ /(.+) CPU/; $HW{'cpuprod'} = $1; }
+        if ($1 eq 'bogomips') { $HW{'bogomips'} = $2; }
+    } @l;
+    $HW{'numcpu'} = $numcpu;
+
+    @l = read_file("/proc/meminfo");
+    grep {
+        /^(\w+):\s+(\d+) kB$/;
+        if ($1 eq 'MemTotal') { $HW{'memory'} = int($2 / 1024) . "Mb"; }
+    } @l;
+
+    %HW;
+}  # get_Hardware_Info
+
+# @Net = get_Network_Info()
+
+sub get_Network_Info {
+    my @N;
+
+    # Get routing information
+    my %R;
+    open(IN, "netstat -nr |") || return @N;
+    while (<IN>) {
+        chomp;
+        next if (/^Kernel/);
+        next if (/^Destination/);
+        # 10.214.32.0     10.214.250.1    255.255.240.0   UG       40 0          0 eth1
+        if (/(\S+)\s+(\S+)\s+(\S+)\s+(\w+)\s+\d+ \d+\s+\d+\s+(\S+)/) {
+            if ($2 ne '0.0.0.0') {
+                $R{$5} = $2;
+            }
+        }
+    }
+    close(IN);
+
+    # Get interfaces and IP addresses
+    open(IN,"ip addr |") || return @N;
+    while (<IN>) {
+        chomp;
+        next if (/ lo:/);
+        next if (/ veth31:/);
+        # 2: eth0: <BROADCAST,MULTICAST,UP> mtu 16896 qdisc pfifo_fast qlen 2000
+        if (/\d+: (\w+):/) {
+            my %if;
+            $if{'name'} = $1;
+
+            $_ = <IN>;
+            #     link/ether 46:be:56:00:01:2d brd ff:ff:ff:ff:ff:ff
+
+            $_ = <IN>;
+            #     inet 144.226.224.33/23 brd 144.226.225.255 scope global eth0
+            if (/inet (\d+)\.(\d+)\.(\d+)\.(\d+)\/(\d+) .+ scope \w+ (\w+)/) {
+                $if{'ip'} = "$1.$2.$3.$4";
+                $if{'mask'} = $5;
+                $if{'gw'} = $R{$if{'name'}};
+            }
+            #     inet 192.168.252.6 peer 192.168.252.5/32 scope global tun0
+            elsif (/inet (\d+)\.(\d+)\.(\d+)\.(\d+) .+ scope \w+ (\w+)/) {
+                $if{'ip'} = "$1.$2.$3.$4";
+                $if{'mask'} = "32";
+                $if{'gw'} = $R{$if{'name'}};
+            }
+            push(@N, \%if);
+        }
+    }
+    close(IN);
+    @N;
+}  # get_Network_Info
+
+sub get_Swap_Info {
+    my %S;
+    open(IN, "swapon -s |") || return %S;
+    while (<IN>) {
+        chomp;
+        next if (/^Filename/);
+        # /dev/sdb1                       partition       1052216 0       -2
+        if (/^(\S+)\s+\w+\s+(\d+)/) {
+            $S{$1} = int($2 / 1024) . "M";
+        }
+    }
+    close(IN);
+    %S;
+}  # get_Swap_Info
+
+sub isEgenera {
+    return (-e '/proc/egenera');
+}  # isEgenera
+
+# @lines = read_file($name)
+
+sub read_file {
+    my $name = shift;
+    open(IN, "<$name") || return ();
+    my @l = <IN>;
+    close(IN);
+    chomp @l;
+    @l;
+}  # read_file

@@ -1,0 +1,41 @@
+#!/bin/sh
+# icon - IPMI console wrapper
+#
+# icon host [-u username] [-p] [command]
+# -u username	use username for login
+# -p		prompt for password
+# command	default command = sol activate
+
+ARGS="-I lanplus"
+USER="ADMIN"
+PASS="IpmiAccess4U$"
+
+while getopts pu:x c; do
+        case $c in
+		p)	PASSPROMPT=1
+			;;
+		u)	USER=$OPTARG
+			;;
+	esac
+done
+shift `expr $OPTIND - 1`
+
+if [ "$PASSPROMPT" = "1" ]; then
+	echo -n "Password: "
+	stty -echo
+	read PASS
+	stty echo
+fi
+
+HOST=$1
+shift
+if [ -z "$HOST" ]; then
+	echo "Usage: $0 host [-u username] [-p] [command]"
+	exit 1
+fi
+CMD=$@
+if [ -z "$CMD" ]; then
+	CMD="sol activate"
+fi
+
+ipmitool $ARGS -U $USER -P $PASS -H $HOST $CMD

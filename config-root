@@ -1,0 +1,96 @@
+#!/bin/bash
+# config-root - Configure root account
+# $Id: config-root 249 2007-08-01 18:31:24Z troyerdl $
+
+PROG=`basename $0`
+DIR=`dirname $0`
+USAGE_TEXT="
+$PROG - Configure root account
+$PROG [-h] [-V]
+-V      Verify configuration changes
+
+root changes:
+- maintain multiple shell histories per real user for root account
+- create /var/log/history to store the shell history files
+"
+
+LOG_DIR="/var/log/history"
+DEF_MODE=700
+DEF_OWNER=root:root
+
+#=============================
+
+# Make the actual changes
+make_change() {
+
+    # configure root account
+    if [ ! -d $LOG_DIR ]; then
+        /bin/mkdir -p $LOG_DIR
+        /bin/chown $DEF_OWNER $LOG_DIR
+        /bin/chmod $DEF_MODE $LOG_DIR
+    fi
+
+    if [ -z "`egrep 'per-sa history' /root/.bashrc`" ]; then
+        cat <<EOF >>/root/.bashrc
+
+# Set up per-sa history
+if [ -w "\$(tty)" ]; then
+    OWNER=\`who am i|awk '{print \$1}'\`
+    export PS1="\u@\h:\w # "
+    export HISTFILE=$LOG_DIR/root_\$OWNER
+    export HISTSIZE=10000
+fi
+EOF
+    fi
+}
+
+# Test for changes
+test_config() {
+    RET=0
+
+    if [ ! -d /var/log/history ]; then
+        echo "/var/log/history doesn't exist"
+        RET=1
+    fi
+
+    if [ -z "`egrep 'per-sa history' /root/.bashrc`" ]; then
+        echo "/root/.bashrc changes may not be present"
+        RET=1
+    fi    
+
+    return $RET
+}
+
+usage() {
+    cat <<HELP_EOF
+$USAGE_TEXT
+HELP_EOF
+}
+
+# Main processing
+
+VERIFY=0
+while getopts hV c; do
+    case $c in
+        h)      usage;
+                exit;
+                ;;
+    	V)	VERIFY=1
+        	;;
+    esac
+done
+shift `expr $OPTIND - 1`
+
+# Verify running as root
+if [ "$EUID" != 0 ]; then
+    echo "Must be root to run $PROG"
+    exit 1
+fi
+
+# Skip changes if this is a Verify run
+if [ "$VERIFY" != 1 ]; then
+    make_change
+fi
+
+test_config
+exit $?

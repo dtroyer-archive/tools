@@ -1,0 +1,690 @@
+#!/usr/bin/perl
+# $Id: diskmap 428 2008-06-11 16:01:11Z troyerdl $
+# diskmap - Map physical/logical disks
+
+use File::Basename;
+# Find out who and where we are
+my ($PROG,$PROGDIR,$x) = File::Basename::fileparse($0);
+
+my $Usage = qq{
+$PROG - Map physical/logical disks
+
+Usage: $PROG [-v]
+
+-v      Verbose output
+};
+
+# read /proc/devices
+# read /proc/partitions
+# if /sys, get block device info
+# else get info from /proc
+
+use Carp;
+use Fcntl ':mode';
+use IO::File;
+use Getopt::Std;
+
+my %opts = ();
+getopts('hvx', \%opts);
+
+if ($opts{'h'}) {
+    usage();
+}
+
+my $DEBUG = $opts{'x'};
+my $VERBOSE = $opts{'v'} || $opts{'x'};
+
+sub usage {
+    print $Usage;
+    exit(255);
+}  # usage
+
+# Disk Hash
+# key is device name
+#  Subhash keys:
+#   addr        - SCSI address in 0:1:2:3 format
+#   device      - /dev/* name
+#   host        - the driver instance (scsi0, ide1, etc)
+#   major       - major device address
+#   media       - type of media: disk, cdrom, tape, etc
+#   minor       - minor device address
+#   model
+#   mpath       - multipath device name
+#   parent      - master device for partition
+#   part        - array of partition device names
+#   paths       - array of multipath path names
+#   size        - device size in GB
+#   vendor
+
+#   part        - array of partitions (if any)
+#   fs          - filesystem mount (if mounted)
+#   raw         - raw device (if any)
+my %Disk;
+
+my %Devices;
+
+my @ScsiType = ("disk","tape","t2","t3","t4","cdrom","t6");
+my %ScsiGeneric;
+
+# Multipath information
+my %MPath;
+
+# Retruns array of vaild generic SCSI device names
+
+sub ScsiEnumerate {
+    opendir DIR, "/dev" or return undef;
+    my %devs;
+    foreach my $file (sort readdir DIR) {
+        my @stat=lstat "/dev/$file";
+        next unless scalar @stat;	# next if stat() failed
+        next unless S_ISCHR($stat[2]); # next if file isn't character special
+        my $major=int($stat[6]/256);
+        next unless $major==21; # major number of /dev/sg* is 21
+        my $minor=$stat[6]%256;
+        next if exists $devs{$minor};
+        $devs{$minor}=$file;
+    }
+    return map {$devs{$_}} sort {$a<=>$b} keys %devs;
+}  # ScsiEnumerate
+
+sub ScsiExecute {
+    my($device, $command, $wanted, $data)=@_;
+  
+    return("x1") unless(length $command==10 || length $command);
+    $data='' unless defined $data;
+
+    my $fh=new IO::File("+</dev/$device");
+    # file not found
+    return undef unless defined $fh;
+
+    my $packet=pack("i4 I x16",
+		  36+length($command.$data),
+		  36+$wanted, 0, 0,
+		  length($command)==12?1:0
+		 );
+    my $iobuf=$packet.$command.$data;
+    my $ret=syswrite $fh, $iobuf, length($iobuf);
+    return("x3") unless defined $ret;
+    $ret=sysread $fh, $iobuf, length($packet)+$wanted;
+    # croak "Can't read from $self->{name}: $!"
+    return undef unless defined $ret;
+    my @data=unpack("i4 I C16", substr($iobuf, 0, 36));
+    # croak "SCSI I/O error $data[3] on $self->{name}"
+    return undef if $data[3];
+
+    undef $fh;
+
+    return (substr($iobuf, 36), [ @data[5..20] ]);
+}  # ScsiExecute
+
+sub ScsiGetID {
+    my $device = shift;
+
+    my $fh=new IO::File("+</dev/$device");
+    # file not found
+    return undef unless defined $fh;
+
+    my $x;
+    ioctl($fh, 0x5382, $x) || die "failure $!";
+    my @q = unpack("C C C C i4",$x);
+    undef $fh;
+    return($q[3],$q[2],$q[0],$q[1]);
+}  # ScsiGetID
+
+# Returns a hashref
+# DEVICE
+# VENDOR
+# PRODUCT
+# REVISION
+
+sub ScsiInquiry {
+    my $device = shift;
+
+    my ($data, $sense) = ScsiExecute($device, pack("C x3 C x5", 0x12, 96), 96); # INQUIRE
+    return undef unless defined($data);
+if (length($data) < 36) {
+    print "ScsiExecute failure: $data\n";
+    return undef;
+}
+
+    my %enq;
+    @enq{qw( DEVICE VENDOR PRODUCT REVISION )}=unpack("C x7 A8 A16 A4", $data);
+    return \%enq;
+}  # ScsiInquiry
+
+# Find a disk given major,minor
+
+sub FindDiskbyID {
+    my $major = shift;
+    my $minor = shift;
+    foreach my $x (keys %Disk) {
+        return $x if (($Disk{$x}->{major} == $major) && ($Disk{$x}->{minor} == $minor));
+    }
+    return undef;
+}  # FindDiskbyID
+
+# Find a generic SCSI device given host:bus:id:lun
+
+sub FindSGbyID {
+    my $id = shift;
+    foreach my $x (keys %ScsiGeneric) {
+        return $x if ($ScsiGeneric{$x}->{addr} eq $id)
+    }
+    return undef
+}  # findSGbyID
+
+# GetFile reads a file and returns the contents in an array
+# The optional $NL will strip newlines if nonzero
+# @lines = GetFile($filename,1)
+
+sub GetFile {
+    my $file = shift;
+    my $nl = shift;
+    my @ret;
+    open(IN,"<$file") || return undef;
+    while (<IN>) {
+        chomp if ($nl);
+        push(@ret,$_);
+    }
+    close(IN);
+    @ret;
+}  # GetFile
+
+# GetFileFirst returns the first line of a file, analagous to head -1
+
+sub GetFileFirst {
+    my @ret = GetFile(@_);
+    $ret[0];
+}  # GetFileFirst
+
+sub DoBlockDevices {
+    my $disk = shift;
+    my $mpath = shift;
+    foreach my $k (keys %{$disk}) {
+#print "k: $k: ",$Devices{$disk->{$k}->{major}},"\n";
+        # Set up device/partition linkage
+        my $minmod = $disk->{$k}->{minor} - ($disk->{$k}->{minor} % 16);
+        my $parent = FindDiskbyID($disk->{$k}->{major},$minmod);
+        if ($parent && $disk->{$k}->{minor} != $minmod) {
+            $disk->{$parent}->{part} = [] if (!$disk->{$parent}->{part});
+            push(@{$disk->{$parent}->{part}}, $k);
+            $disk->{$k}->{parent} = $parent;
+        }
+
+        # Get specific information about the device
+        if ($Devices{$disk->{$k}->{major}} =~ /^cciss/) {
+            GetCcissDisk($disk->{$k});
+        }
+        elsif ($Devices{$disk->{$k}->{major}} eq "device-mapper") {
+            delete($disk->{$k});
+        }
+        elsif ($Devices{$disk->{$k}->{major}} =~ /^emcp/) {
+            GetPPathDisk($disk->{$k});
+            if (!$disk->{$k}->{parent}) {
+                $disk->{$k}->{paths} = $mpath->{$k}->{paths};
+                for my $i (@{$disk->{$k}->{paths}}) {
+                    $disk->{$i}->{mpath} = $k;
+                }
+            }
+        }
+#        elsif ($Devices{$disk->{$k}->{major}} eq "fd") {
+#        }
+        elsif ($Devices{$disk->{$k}->{major}} =~ /^ide/) {
+            GetIdeDisk($disk->{$k});
+        }
+        elsif ($Devices{$disk->{$k}->{major}} eq "loop") {
+            delete($disk->{$k});
+        }
+        elsif ($Devices{$disk->{$k}->{major}} =~ /^lvm/) {
+            delete($disk->{$k});
+        }
+#        elsif ($Devices{$disk->{$k}->{major}} eq "md") {
+#        }
+#        elsif ($Devices{$disk->{$k}->{major}} eq "mdp") {
+#        }
+#        elsif ($Devices{$disk->{$k}->{major}} eq "ramdisk") {
+#        }
+        elsif ($Devices{$disk->{$k}->{major}} eq "sd") {
+            GetScsiDisk($disk->{$k});
+        }
+        elsif ($Devices{$disk->{$k}->{major}} eq "xvd") {
+            GetXenDisk($disk->{$k});
+        }
+        elsif ($Devices{$disk->{$k}->{major}} =~ /^bcrypt/) {
+            delete($disk->{$k});
+        }
+        else {
+            print "Unknown device type: ",$Devices{$disk->{$k}->{major}},"(",$disk->{$k}->{major},")\n";
+        }
+    }
+}  # DoBlockDevices
+
+# Get all info we can find on the specified SmartArray device
+# GetCcissDisk(\%disk);
+
+sub GetCcissDisk {
+    my $disk = shift;
+    my $dev = $disk->{device};
+
+    $disk->{media} = "disk";
+    $disk->{model} = "cciss";
+    $disk->{vendor} = "Compaq";
+}  # GetCcissDisk
+
+# Get all info we can find on the specified SCSI device
+# GetIdeDisk(\%disk);
+
+sub GetIdeDisk {
+    my $disk = shift;
+    my $dev = $disk->{device};
+
+    $disk->{modalias} = GetFileFirst("/sys/block/$dev/device/modalias",1);
+    $disk->{media} = GetFileFirst("/proc/ide/$dev/media",1);
+    $disk->{model} = GetFileFirst("/proc/ide/$dev/model",1);
+
+    # Get IDE host
+    my $l = readlink("/proc/ide/$dev");
+    if ($l =~ /^(.+)\/$dev/) {
+        $disk->{host} = $1;
+    }
+}  # GetIdeDisk
+
+# Get all info we can find on the specified PowerPath device
+# GetPPathDisk(\%disk);
+
+sub GetPPathDisk {
+    my $disk = shift;
+    my $dev = $disk->{device};
+
+    $disk->{media} = "mpath";
+    $disk->{model} = "";
+    $disk->{vendor} = "EMC";
+}  # GetPPathDisk
+
+# Get all info we can find on the specified SCSI device
+# GetScsiDisk(\%disk);
+
+sub GetScsiDisk {
+    my $disk = shift;
+    my $dev = $disk->{device};
+
+    # Handle SCSI disks
+#    my @scsi = DirLookup("/sys/block/$dev/device/","scsi_disk");
+    my $l = readlink("/sys/block/$dev/device");
+    #my @x = split(/\//, $l);
+    #my ($host,$channel,$id,$lun) = split(/\:/, pop(@x));
+    my ($host,$channel,$id,$lun) = ScsiGetID($dev);
+    $disk->{addr} = "$host:$channel:$id:$lun";
+    $disk->{host} = "scsi$host";
+    $sg = FindSGbyID("$host:$channel:$id:$lun");
+    if ($sg && defined($ScsiGeneric{$sg})) {
+        for my $i (qw/model revision vendor/) {
+            $disk->{$i} = $ScsiGeneric{$sg}->{$i} if ($ScsiGeneric{$sg}->{$i});
+        }
+        $disk->{media} = $ScsiType[$ScsiGeneric{$sg}->{media}];
+    }
+    $disk->{media} = GetFileFirst("/sys/block/$dev/device/type",1);
+    $disk->{model} = GetFileFirst("/sys/block/$dev/device/model",1);
+    $disk->{vendor} = GetFileFirst("/sys/block/$dev/device/vendor",1);
+}  # GetScsiDisk
+
+# Get all info we can find on the specified Xen virtual device
+# GetXenDisk(\%disk);
+
+sub GetXenDisk {
+    my $disk = shift;
+    my $dev = $disk->{device};
+
+    $disk->{modalias} = GetFileFirst("/sys/block/$dev/device/nodename",1);
+#    $disk->{media} = GetFileFirst("/proc/ide/$dev/media",1);
+#    $disk->{model} = GetFileFirst("/proc/ide/$dev/model",1);
+#    $disk->{vendor} = GetFileFirst("$dir/$dev/device/vendor",1);
+
+    $disk->{media} = "disk";
+    $disk->{model} = "";
+    $disk->{vendor} = "Xen";
+}  # GetXenDisk
+
+# Gets PowerPath info
+
+sub GetPPath {
+    my $ppath = shift;
+
+#print "GetMPath()\n";
+    return if (! -x "/sbin/powermt");
+
+    open(IN, "/sbin/powermt display dev=all|") || return;
+    my $dev = "";
+    while (<IN>) {
+        next if (/^==/ || /^\s*$/);
+        chomp;
+        if (/^Pseudo name=(\w+)/) {
+            $dev = $1;
+            $ppath->{$dev}->{device} = $dev;
+#print "New device: $dev\n";
+        }
+        elsif (/^\s*(\d+)\s+(\w+)\s+(\w+)\s+SP (\w+)/) {
+#print ": $_\n";
+            if (!defined($ppath->{$dev}->{paths})) {
+                my @p;
+                $ppath->{$dev}->{paths} = \@p;
+            }
+            push(@{$ppath->{$dev}->{paths}},$3);
+        }
+        else {
+#            print "Unknown: $_\n";
+        }
+    }
+    close(IN);
+}  # GetPPath
+
+# Loads SCSI generic devices
+
+sub GetScsiGeneric {
+    my $sg = shift;
+
+    my @sgdevices = ScsiEnumerate();
+    foreach my $d (@sgdevices) {
+        my $dinfo = ScsiInquiry($d);
+        $sg->{$d}->{device} = $d;
+        $sg->{$d}->{addr} = "";
+        $sg->{$d}->{media} = $dinfo->{DEVICE};
+        $sg->{$d}->{model} = $dinfo->{PRODUCT};
+        $sg->{$d}->{revision} = $dinfo->{REVISION};
+        $sg->{$d}->{vendor} = $dinfo->{VENDOR};
+#print " $d  ",$ScsiType[$dinfo->{DEVICE}],"\t",$dinfo->{PRODUCT},"\n";
+    }
+
+    my @sgx = GetFile("/proc/scsi/sg/devices");
+    my $count = 0;
+    foreach my $l (@sgx) {
+        my @d = ScsiGetID("sg$count");
+        #my @d = split(/\s+/, $l);
+        $sg->{"sg$count"}->{addr} = "$d[0]:$d[1]:$d[2]:$d[3]";
+#print "$count: $d[0]:$d[1]:$d[2]:$d[3]\n";
+        $count++;
+    }
+}  # GetScsiGeneric
+
+# Return a list of matching directory entries
+# @f = DirLookup("/dev","sda*");
+
+sub DirLookup {
+    my $dir = shift;
+    my $x = shift;
+    my @ret;
+    local *DIR;
+    opendir (DIR, "$dir") || return ();
+    my @allfiles = readdir(DIR);
+    closedir (DIR);
+    foreach my $dev (@allfiles) {
+        # skip files with leading '.' (specifically . ..)
+        next if ($file =~ m/^\./);
+        if ($dev =~ /$x/) {
+	    push(@ret,$dev);
+	}
+    }
+    @ret;
+}  # DirLookup
+
+sub ReadProcDevices {
+    $dev = shift;
+    open(IN, "</proc/devices");
+    my $block = 0;
+    while (<IN>) {
+        $block = 1 if (/^Block/);
+        next if (($block == 0) || (/^Block/) || (/^Char/) || (/^\s*$/));
+    	chomp;
+        my @x = split(/\s+/, " $_");
+        $dev->{$x[1]} = $x[2];
+#print "major=$x[1] ($x[2])\n";
+    }
+    close(IN);
+}  # ReadProcDevices
+
+sub ReadProcDriverCciss {
+    $disk = shift;
+
+    # Get host
+    local *DIR;
+    opendir (DIR, "/proc/driver/cciss") || return undef;
+    my @allfiles = readdir(DIR);
+    closedir (DIR);
+    foreach my $f (@allfiles) {
+        open(IN, "</proc/driver/cciss/$f");
+        while (<IN>) {
+            chomp;
+            if (/^cciss\/(.+):\s+(\S+)\s+(.+)$/) {
+                $disk->{"cciss/$1"}->{host} = $f;
+                print "$f: $1 $3\n";
+            }
+        }
+        close(IN);
+    }
+}  # ReadProcDriverCciss
+
+# GetProcPartitions(\%Disks)
+
+sub ReadProcPartitions {
+    $disk = shift;
+    open(IN, "</proc/partitions");
+    while (<IN>) {
+        next if ((/^major/) || (/^\s*$/));
+    	chomp;
+        my @x = split(/\s+/);
+        my $k = $disk->{$x[4]};
+        if (!defined($k)) {
+            $k->{$x[4]} = {};
+        }
+        $k->{device} = $x[4];
+        $k->{major} = "$x[1]";
+        $k->{minor} = "$x[2]";
+        $k->{size} = $x[3] / 1024 / 1024;
+        $disk->{$x[4]} = $k;
+    }
+    close(IN);
+}  # ReadProcPartitions
+
+sub ShowDisks {
+    print "Device        Addr        Size  Multipath    Host\n";
+    foreach my $k (sort keys %Disk) {
+        # Skip multipath agregate devices
+        next if (defined($Disk{$k}->{paths}));
+        # Skip partitions
+        next if (defined($Disk{$k}->{parent}));
+        printf "%-12s %-11s %5d  %-12s %-8s\n", 
+            $Disk{$k}->{device},
+            $Disk{$k}->{addr},
+            $Disk{$k}->{size},
+            $Disk{$k}->{mpath},
+            $Disk{$k}->{host},
+            ;
+    }
+}  # ShowDisks
+
+#GetProcScsi();
+#%Disk = GetBlockDevices();
+
+GetScsiGeneric(\%ScsiGeneric);
+ReadProcDevices(\%Devices);
+ReadProcPartitions(\%Disk);
+GetPPath(\%MPath);
+DoBlockDevices(\%Disk,\%MPath);
+ReadProcDriverCciss(\%Disk);
+
+ShowDisks();
+
+if ($VERBOSE) {
+    print "====================\nSCSI Generic\n";
+    DumpScsiGeneric(1);
+    print "====================\nDump \%Disk\n";
+    DumpDisk(1);
+    print "====================\n";
+    #DumpMPath(1);
+}
+
+sub DumpDisk {
+    my $verbose = shift;
+    print "Device        Size  Media    Vendor       Model            Host\n";
+    foreach my $k (sort keys %Disk) {
+        next if ($Disk{$k}->{parent} && !$verbose);
+        my $p = join(" ",@{$Disk{$k}->{paths}});
+        printf "%-12s %5d  %-8s %-12s %-16s %-12s %s %s %s\n", 
+            $Disk{$k}->{device},
+            $Disk{$k}->{size},
+            $Disk{$k}->{media},
+            $Disk{$k}->{vendor},
+            $Disk{$k}->{model},
+            $Disk{$k}->{host},
+            $Disk{$k}->{parent},
+            $Disk{$k}->{mpath},
+            $p,
+            ;
+    }
+}  # DumpDisk
+
+sub DumpMPath {
+    my $verbose = shift;
+    print "MetaDevice   Paths\n";
+    foreach my $k (sort keys %MPath) {
+        my $p = join(" ",@{$MPath{$k}->{paths}});
+        printf "%-12s [%s]\n", 
+            $MPath{$k}->{device},
+            $p,
+            ;
+    }
+}  # DumpMPath
+
+sub DumpScsiGeneric {
+    foreach my $k (sort keys %ScsiGeneric) {
+        printf "%-10s %-11s %-8s %-12s %-18s\n", 
+            $ScsiGeneric{$k}->{device},
+            $ScsiGeneric{$k}->{addr},
+            $ScsiType[$ScsiGeneric{$k}->{media}],
+            $ScsiGeneric{$k}->{vendor},
+            $ScsiGeneric{$k}->{model},
+            ;
+    }
+}  # DumpScsiGeneric
+
+# Unused routines, kept for reference
+
+sub ReadProcIde {
+    my %ret;
+    # scan directory
+    my $dir = "/proc/ide";
+    local *DIR;
+    opendir (DIR, "$dir") || return undef;
+    my @allfiles = readdir(DIR);
+    closedir (DIR);
+    foreach my $dev (@allfiles) {
+        # skip files with leading '.' (specifically . ..)
+        next if ($file =~ m/^\./);
+        if ($dev =~ /hd/) {
+            # Handle IDE disks
+            my %d;
+            $d{device} = $dev;
+            $d{type} = "ide";
+            $d{mm} = GetFileFirst("$dir/$dev/dev",1);
+            $d{size} = GetFileFirst("$dir/$dev/capacity",1) / 1024 / 1024;
+            $d{media} = GetFileFirst("$dir/$dev/media",1);
+            $d{model} = GetFileFirst("$dir/$dev/model",1);
+            $d{vendor} = "unknown";
+            # Get IDE host
+            my $l = readlink("$dir/$dev");
+            if ($l =~ /^(.+)\/$dev/) {
+                $d{host} = $1;
+            }
+            $ret{$dev} = \%d;
+        }
+    }
+    %ret;
+}  # ReadProcIde
+
+# Read /proc/scsi/scsi
+
+sub ReadProcScsi {
+    my %SCSI = {};
+    my $key;
+    open(IN, "</proc/scsi/scsi");
+    while (<IN>) {
+    	chomp;
+	if (/^Host: (scsi\d+) Channel: (\d+) Id: (\d+) Lun: (\d+)/) {
+	    $key = "$1.$2.$3.$4";
+	    $SCSI{$key} = [$1,$2,$3,$4];
+	    print "SCSI: $key\n";
+	}
+	elsif (/Vendor: +(.+) +Model: (.+) +Rev: +(\S+)/) {
+    	    print "Model: $2\n";
+	}
+	elsif (/Type: +(\S+)/) {
+	    print "Type: $1\n";
+	}
+    }
+    close(IN);
+}  # ReadProcScsi
+
+# Read through /sys/block
+# Returns undef if /sys/block does not exist
+
+sub ReadSysBlock {
+    my %ret;
+    # scan directory
+    my $dir = "/sys/block";
+    local *DIR;
+    opendir (DIR, "$dir") || return undef;
+    my @allfiles = readdir(DIR);
+    closedir (DIR);
+    foreach my $dev (@allfiles) {
+        # skip files with leading '.' (specifically . ..)
+        next if ($file =~ m/^\./);
+        if ($dev =~ /hd/) {
+            # Handle IDE disks
+            my %d;
+            $d{device} = $dev;
+            $d{type} = "ata";
+            $d{mm} = GetFileFirst("$dir/$dev/dev",1);
+            $d{size} = GetFileFirst("$dir/$dev/size",1) / 1024 / 1024;
+            $d{modalias} = GetFileFirst("$dir/$dev/device/modalias",1);
+            $d{media} = GetFileFirst("/proc/ide/$dev/media",1);
+            $d{model} = GetFileFirst("/proc/ide/$dev/model",1);
+            $d{vendor} = "unknown";
+
+            # Get IDE host
+            my $l = readlink("/proc/ide/$dev");
+            if ($l =~ /^(.+)\/$dev/) {
+                $d{host} = $1;
+            }
+            $ret{$dev} = \%d;
+        }
+	elsif ($dev =~ /sd/) {
+            # Handle SCSI disks
+    	    my %d;
+            $d{device} = $dev;
+            $d{type} = "scsi";
+            $d{mm} = GetFileFirst("$dir/$dev/dev",1);
+            $d{size} = GetFileFirst("$dir/$dev/size",1) / 1024 / 1024;
+            my @scsi = DirLookup("$dir/$dev/device/","scsi_disk");
+            my ($type,$host,$channel,$id,$lun) = split(/\:/, $scsi[0]);
+            $d{addr} = "$host:$channel:$id:$lun";
+            $d{host} = "scsi$host";
+            $d{modalias} = GetFileFirst("$dir/$dev/device/modalias",1);
+            $d{model} = GetFileFirst("$dir/$dev/device/model",1);
+            $d{vendor} = GetFileFirst("$dir/$dev/device/vendor",1);
+            $ret{$dev} = \%d;
+        }
+	elsif ($dev =~ /xvd/) {
+            # Handle Xen virtual disks
+    	    my %d;
+            $d{device} = $dev;
+            $d{type} = "vbd";
+            $d{mm} = GetFileFirst("$dir/$dev/dev",1);
+            $d{size} = GetFileFirst("$dir/$dev/size",1) / 1024 / 1024;
+            $d{modalias} = GetFileFirst("$dir/$dev/device/modalias",1);
+            $d{model} = GetFileFirst("$dir/$dev/device/model",1);
+            $d{vendor} = GetFileFirst("$dir/$dev/device/vendor",1);
+            $ret{$dev} = \%d;
+        }
+    }
+    %ret;
+}  # ReadSysBlock

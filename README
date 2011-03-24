@@ -1,0 +1,25 @@
+config-drac - Configure Dell Remote Access Card: NIC settings, timeouts
+
+config-root - Configure root account for per-login history
+
+config-su - Configure su: enable pam_wheel for root access
+
+config-sudo - Configure sudo: get default sudoers file, set up log file,
+	set up log file rotation
+
+diskmap - Map physical/logical disks
+
+icon - IPMI console wrapper for ipmitool
+
+invinfo - Collect inventory information from system
+
+mkusers - Create user accounts from passwd file lines
+
+rxt - configure xterm for specific hosts
+
+ssh-mkkeys - Manage OpenSSH keys between hosts (uses ssh-conf)
+
+syscfgdiff - Takes snapshot of system configuration, produces diff between 
+	snapshots
+
+sysprofile - Displays information for creating system profile documents

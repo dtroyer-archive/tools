@@ -1,0 +1,307 @@
+#!/bin/bash
+# config-drac - Configure DRAC from OS
+# $Id: config-drac 556 2009-07-09 22:15:53Z troyerdl $
+
+PROG=`basename $0`
+DIR=`dirname $0`
+USAGE_TEXT="
+$PROG - Configure DRAC on Dell servers
+$PROG [-h] [-V] [-r] [-D | -i ip -g gw -n netmask -d dns] [-P pwfile] [-R]
+-V          Verify configuration changes
+-D          Use DHCP
+-i ip       IP address
+-g gw       Default gateway
+-n netmask  Netmask
+-d domain   DNS domain
+-P file     read DRAC password from file
+-R          Reboot DRAC after configuration changes
+-r          Reset DRAC to factory defaults before configuration changes
+-s sec      Set ssh timeout (in seconds)
+-w sec      Set web timeout (in seconds)
+
+script changes:
+- set DRAC hostname to server hostnem + '-con'
+- set NIC = 100MB, full duplex, no autoneg
+- configure serial console and enable ssh
+- set session timeouts
+- set IP configuration (optional)
+- set login password for root (optional)
+- reset DRAC to factory defaults before configuration changes (optional)
+- reboot DRAC after making all changes (optional)
+"
+
+# Defaults
+DRAC_SSH_TIMEOUT=1200
+DRAC_WEB_TIMEOUT=1200
+
+DRAC_PASSWORD=
+DRAC_PASSWORD_FILE=""
+
+DRAC_IPADDR=
+DRAC_GATEWAY=
+DRAC_NETMASK=
+DRAC_DOMAIN=
+DRAC_RESET=0
+
+RACADM="/usr/sbin/racadm"
+
+# Make temp file safely if we can
+TMPDIR=${TMPDIR-/tmp}
+mktemp=`which mktemp`
+if [ -n "$mktemp" ]; then
+        TMP_FILE=`mktemp -t drac.XXXXX` || exit 1
+else
+        TMP_FILE=$TMPDIR/drac.$$
+        (umask 077 && mkdir $TMP_FILE) || exit 1
+fi
+
+if [ ! -x $RACADM ]; then
+    echo "$RACADM not found"
+    if [ -z "`rpm -qa | grep racadm`" ]; then
+        echo "Ensure that an appropriate DRAC driver package is installed"
+    fi
+    exit 1
+fi
+
+#=============================
+# Boilerplate functions
+SAVE_EXT=orig-config
+
+# save_orig_file makes a copy of the original file if it doesn't exist
+# save_orig_file filename
+save_orig_file() {
+    if [ ! -e $1.$SAVE_EXT ]; then
+        /bin/cp -p $1 $1.$SAVE_EXT
+    fi
+}
+
+# set_file owner mode filename [filename ...]
+set_file() {
+    OWNER=$1; shift
+    MODE=$1; shift
+    FILE="$@"
+
+    for i in $FILE; do
+        if [ ! -e $i ]; then
+            /bin/touch $i
+        fi
+    done
+
+    /bin/chown $OWNER $FILE
+    /bin/chmod $MODE $FILE
+}
+
+# test_file owner mode filename
+# Returns: 1=file not found, 2=wrong permissions
+test_file() {
+    RET=0
+    OWNER=$1; shift
+    MODE=$1; shift
+    FILE=$1
+
+    if [ ! -e $FILE ]; then
+        echo "$FILE not present"
+        RET=1
+    else
+        X=`stat -c "%a %U %G" $1`
+        set $X
+        if [ $1 != $MODE ]; then
+            echo "$FILE mode is $1, should be $MODE"
+            RET=2
+        fi
+        if [ "$2:$3" != $OWNER ]; then
+            echo "$FILE owner is $2:$3, should be $OWNER"
+            RET=2
+        fi
+    fi
+    return $RET
+}
+
+# test_value actual expected msg
+test_value() {
+    RET=0
+    if [ "$1" != "$2" ]; then
+        RET=1
+        echo "$3: $1 != $2"
+    fi
+    return $RET
+}
+
+#=============================
+
+# Make the actual changes
+make_change() {
+    if [ $RESET = 1 ]; then
+        # Reset DRAC to factory defaults
+        echo "Resetting DRAC to defaults, sleep 90 seconds..."
+        $RACADM racresetcfg
+        sleep 90
+    fi
+
+    # Set config options
+    HOST=`hostname`
+    echo "Setting DRAC options"
+    $RACADM config -g cfgLanNetworking     -o cfgDNSRacName ${HOST}-con
+    $RACADM config -g cfgNetTuning         -o cfgNetTuningNic100MB 1
+    $RACADM config -g cfgNetTuning         -o cfgNetTuningNicFullDuplex 1
+    $RACADM config -g cfgNetTuning         -o cfgNetTuningNicAutoneg 0
+    $RACADM config -g cfgSerial            -o cfgSerialConsoleEnable 1
+    $RACADM config -g cfgSerial            -o cfgSerialTelnetEnable 0
+    $RACADM config -g cfgSerial            -o cfgSerialSshEnable 1
+    $RACADM config -g cfgSessionManagement -o cfgSsnMgtWebserverTimeout ${DRAC_WEB_TIMEOUT}
+    $RACADM config -g cfgSessionManagement -o cfgSsnMgtSshIdleTimeout ${DRAC_SSH_TIMEOUT}
+    [ -n ${DRAC_PASSWORD} ] && $RACADM config -g cfgUserAdmin -i 2 -o cfgUserAdminPassword ${DRAC_PASSWORD}
+
+    # set network
+    if [ "${DHCP}" = "0" ] ; then
+        [ -n "${DRAC_DOMAIN}" ] && $RACADM config -g cfgLanNetworking -o cfgDNSDomainName ${DRAC_DOMAIN}
+        [ -n "${DRAC_IPADDR}" ] && $RACADM config -g cfgLanNetworking -o cfgNicIpAddress ${DRAC_IPADDR}
+        [ -n "${DRAC_GATEWAY}" ] && $RACADM config -g cfgLanNetworking -o cfgNicGateway ${DRAC_GATEWAY}
+        [ -n "${DRAC_NETMASK}" ] && $RACADM config -g cfgLanNetworking -o cfgNicNetmask ${DRAC_NETMASK}
+        $RACADM config -g cfgLanNetworking -o cfgNicUseDhcp 0
+    else
+        $RACADM config -g cfgLanNetworking -o cfgNicUseDhcp 1
+    fi
+
+    sleep 3
+    if [ ${DRAC_RESET} = 1 ]; then
+        echo "Rebooting drac"
+        $RACADM racreset
+    fi
+}
+
+# Test for changes
+test_config() {
+    RET=0
+
+    `$RACADM getconfig -g cfgLanNetworking >$TMP_FILE`
+    . $TMP_FILE
+    [ "$VERBOSE" = "1" ] && cat $TMP_FILE
+
+    test_value $cfgNicEnable 1 "NIC not enabled"
+    [ $? != 0 ] && RET=1
+
+    test_value $cfgDNSRacName "`hostname`-con" "Hostname not set"
+    [ $? != 0 ] && RET=1
+
+    if [ $DHCP = 1 ]; then
+        test_value $cfgNicUseDhcp 1 "DHCP not enabled"
+        [ $? != 0 ] && RET=1
+    else
+        test_value $cfgNicUseDhcp 0 "DHCP enabled"
+        [ $? != 0 ] && RET=1
+
+        [ -n "$DRAC_IPADDR" ] && test_value $cfgNicIpAddress $DRAC_IPADDR "IP address not set"
+        [ $? != 0 ] && RET=1
+
+        [ -n "$DRAC_NETMASK" ] && test_value $cfgNicNetmask $DRAC_NETMASK "Netmask not set"
+        [ $? != 0 ] && RET=1
+
+        [ -n "$DRAC_GATEWAY" ] && test_value $cfgNicGateway $DRAC_GATEWAY "Gateway not set"
+        [ $? != 0 ] && RET=1
+
+        [ -n "$DRAC_DOMAIN" ] && test_value $cfgDNSDomainName $DRAC_DOMAIN "DNS domain not set"
+        [ $? != 0 ] && RET=1
+
+    fi
+
+    `$RACADM getconfig -g cfgNetTuning >$TMP_FILE`
+    . $TMP_FILE
+    [ "$VERBOSE" = "1" ] && cat $TMP_FILE
+
+    test_value $cfgNetTuningNic100MB 1 "NIC not set to 100MB"
+    [ $? != 0 ] && RET=1
+
+    test_value $cfgNetTuningNicFullDuplex 1 "NIC not set to full duplex"
+    [ $? != 0 ] && RET=1
+
+    test_value $cfgNetTuningNicAutoneg 0 "NIC set to autonegotiate"
+    [ $? != 0 ] && RET=1
+
+    `$RACADM getconfig -g cfgSerial >$TMP_FILE`
+    . $TMP_FILE
+    [ "$VERBOSE" = "1" ] && cat $TMP_FILE
+
+    test_value $cfgSerialConsoleEnable 1 "Serial console not enabled"
+    [ $? != 0 ] && RET=1
+
+    test_value $cfgSerialTelnetEnable 0 "Telnet console enabled"
+    [ $? != 0 ] && RET=1
+
+    test_value $cfgSerialSshEnable 1 "ssh console not enabled"
+    [ $? != 0 ] && RET=1
+
+    `$RACADM getconfig -g cfgSessionManagement >$TMP_FILE 2>/dev/null`
+    . $TMP_FILE
+
+    test_value $cfgSsnMgtWebserverTimeout $DRAC_WEB_TIMEOUT "Web timeout"
+    [ $? != 0 ] && RET=1
+
+    test_value $cfgSsnMgtSshIdleTimeout $DRAC_SSH_TIMEOUT "ssh timeout"
+    [ $? != 0 ] && RET=1
+
+    return $RET
+}
+
+usage() {
+    echo $USAGE_TEXT
+}
+
+# Main processing
+
+VERIFY=0
+DHCP=0
+RESET=0
+VERBOSE=0
+while getopts Dd:g:i:n:P:hs:Vvw: c; do
+    case $c in
+        h)      usage;
+                exit;
+                ;;
+    	V)	VERIFY=1
+        	;;
+        D)      DHCP=1;
+                ;;
+        r)      RESET=1
+                ;;
+        i)      DRAC_IPADDR=$OPTARG
+                ;;
+        g)      DRAC_GATEWAY=$OPTARG
+                ;;
+        n)      DRAC_NETMASK=$OPTARG
+                ;;
+        d)      DRAC_DOMAIN=$OPTARG
+                ;;
+        P)      DRAC_PASSWORD_FILE=$OPTARG
+		if [ -r $DRAC_PASSWORD_FILE ]; then
+			DRAC_PASSWORD=`cat $DRAC_PASSWORD_FILE`
+		fi
+                ;;
+	R)	DRAC_RESET=1
+		;;
+        s)      DRAC_SSH_TIMEOUT=$OPTARG
+                ;;
+        v)      VERBOSE=1
+                ;;
+        w)      DRAC_WEB_TIMEOUT=$OPTARG
+                ;;
+    esac
+done
+shift `expr $OPTIND - 1`
+
+# Verify running as root
+if [ "$EUID" != 0 ]; then
+    echo "Must be root to run $PROG"
+    exit 1
+fi
+
+# Skip changes if this is a Verify run
+if [ "$VERIFY" != 1 ]; then
+    make_change
+fi
+
+test_config
+
+rm -rf $TMP_FILE
+
+exit $?
