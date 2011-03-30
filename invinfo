@@ -14,7 +14,8 @@ TMPFILE="/tmp/$PROG.$$"
 PROCVMMEMCTL=/proc/vmmemctl
 
 DMIDECODE=/usr/sbin/dmidecode
-LSPCI=/sbin/lspci
+LSPCI=/usr/bin/lspci
+if [ -x /sbin/lspci ]; then LSPCI=/sbin/lspci; fi
 IP=/sbin/ip
 
 # CPUSPEED (MHz)
@@ -126,22 +127,28 @@ GetRouteInfo() {
 
 GetOSInfo() {
     # Figure out which vedor we are
-    for r in RedHat CentOS Fedora; do
-        VENDORPKG="`echo $r | tr [:upper:] [:lower:]`-release"
-        VENDORNAME=$r
-        RELEASE=`rpm -q --queryformat '%{VERSION}' $VENDORPKG`
-        if [ $? = 0 ]; then
-            break
-        fi
-        VENDORNAME=""
-    done
-    # Get update level
-    if [ -n "`grep Update /etc/redhat-release`" ]; then
-        # Get update
-        UPDATE=`cat /etc/redhat-release | sed s/.*Update\ // | sed s/\)$//`
+    if [ -r /etc/lsb-release ]; then
+        . /etc/lsb-release
+        VENDORNAME=$DISTRIB_ID
+        RELEASE=$DISTRIB_RELEASE
     else
-        # Assume update 0
-        UPDATE=0
+        for r in RedHat CentOS Fedora; do
+            VENDORPKG="`echo $r | tr [:upper:] [:lower:]`-release"
+            VENDORNAME=$r
+            RELEASE=`rpm -q --queryformat '%{VERSION}' $VENDORPKG`
+            if [ $? = 0 ]; then
+                break
+            fi
+            VENDORNAME=""
+        done
+        # Get update level
+        if [ -n "`grep Update /etc/redhat-release`" ]; then
+            # Get update
+            UPDATE=`cat /etc/redhat-release | sed s/.*Update\ // | sed s/\)$//`
+        else
+            # Assume update 0
+            UPDATE=0
+        fi
     fi
 
     echo "os_vendor=$VENDORNAME" >$1.os
@@ -161,6 +168,7 @@ GetPCIInfo() {
 	/Dell PowerEdge Expandable RAID/s/^.*ller \(.*\) (.*)$/pci_raid_perc=\1/p;t;
 	/Dell PowerEdge Expandable RAID/s/^.*ller \(.*\)$/pci_raid_perc=\1/p;
 	/Smart Array/s/^.*Smart Array \(.*\) (.*)/pci_raid_cciss=\1/p;
+	/Symbios Logic MegaRAID SAS/s/^.*SAS \(.*\) (.*)$/pci_raid_megaraid=sas_\1/p;t;
 
 	/Dell Embedded Remote Access or ERA/s/^.*ss or /pci_rcon_era=/p;
 	/Dell Remote Access Card III/s/^.*$/pci_rcon_drac=3\nrcon=DRAC3/p;
@@ -173,6 +181,9 @@ GetPCIInfo() {
 	/Advanced Micro Devices .*PCnet32/s/^.*AMD\] \(.*\) \[PC.*$/pci_net_pcnet32=\1/p;
 	/PRO\/Wireless/s/^.*Wireless \(.*\) Network.*$/pci_net_ipw=\1/p;
 	/Ethernet Pro/s/^.*tion \(.*\) \[Ether.*$/pci_net_epro=\1/p;
+	/Ethernet controller: Intel Corporation .* Gigabit/s/^.*ration \(.*\) Gigabit .*$/pci_net_epro=\1/p;
+	/NetXen Incorporated .* Multi/s/^.*rated \(.*\) Multi.*$/pci_net_netxen=\1/p;
+	/Ethernet controller: Intel Corporation .* 10-Gigabit/s/^.*ration \(.*\) 10-Gigabit .*$/pci_net_epro=\1/p;
 
 	/Symbios Logic/s/^.*Symbios Logic \(.*\) PCI-X.*(.*)$/pci_scsi_lsi=\1/p;t;
 	/Symbios Logic/s/^.*Symbios Logic \(.*\) (.*)$/pci_scsi_lsi=\1/p;
@@ -182,6 +193,7 @@ GetPCIInfo() {
     # 02:0e.0 RAID bus controller: Dell PowerEdge Expandable RAID controller 5i
     # 01:03.0 RAID bus controller: Compaq Computer Corporation Smart Array 5i/532 (rev 01)
     # 02:02.0 RAID bus controller: Compaq Computer Corporation Smart Array 64xx (rev 01)
+    # 03:00.0 RAID bus controller: LSI Logic / Symbios Logic MegaRAID SAS 1078 (rev 04)
 
     # pci.rcon
     # 00:04.0 Class ff00: Dell Embedded Remote Access or ERA/O
@@ -197,6 +209,9 @@ GetPCIInfo() {
     # 00:12.0 Ethernet controller: Advanced Micro Devices [AMD] 79c970 [PCnet32 LANCE] (rev 10)
     # 04:02.0 Network controller: Intel Corporation PRO/Wireless 2200BG Network Connection (rev 05)
     # 00:02.0 Ethernet controller: Intel Corporation 82557/8/9 [Ethernet Pro 100] (rev 08)
+    # 04:00.0 Ethernet controller: NetXen Incorporated NX3031 Multifunction 1/10 Gigabit Server Adapter (rev 42)
+    # 05:00.0 Ethernet controller: Intel Corporation 82576 Gigabit Network Connection (rev 01)
+    # 04:00.0 Ethernet controller: Intel Corporation 82599EB 10-Gigabit Network Connection (rev 01)
 
     # pci.scsi
     # 00:01.0 RAID bus controller: LSI Logic / Symbios Logic 53C1510 (rev 02)
@@ -302,4 +317,4 @@ for i in os cpu dmi pci net route; do
 done
 
 # Clean up after ourselves
-rm $TMPFILE.*
+#rm $TMPFILE.*
