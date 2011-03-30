@@ -71,7 +71,7 @@ my %MPath;
 
 # Retruns array of vaild generic SCSI device names
 
-sub ScsiEnumerate {
+sub ScsiEnumerateDev {
     opendir DIR, "/dev" or return undef;
     my %devs;
     foreach my $file (sort readdir DIR) {
@@ -85,7 +85,7 @@ sub ScsiEnumerate {
         $devs{$minor}=$file;
     }
     return map {$devs{$_}} sort {$a<=>$b} keys %devs;
-}  # ScsiEnumerate
+}  # ScsiEnumerateDev
 
 sub ScsiExecute {
     my($device, $command, $wanted, $data)=@_;
@@ -120,12 +120,14 @@ sub ScsiExecute {
 sub ScsiGetID {
     my $device = shift;
 
+    print "ScsiGetID($device)\n" if ($DEBUG);
+
     my $fh=new IO::File("+</dev/$device");
     # file not found
     return undef unless defined $fh;
 
     my $x;
-    ioctl($fh, 0x5382, $x) || die "failure $!";
+    ioctl($fh, 0x5382, $x) || return undef;
     my @q = unpack("C C C C i4",$x);
     undef $fh;
     return($q[3],$q[2],$q[0],$q[1]);
@@ -139,11 +141,12 @@ sub ScsiGetID {
 
 sub ScsiInquiry {
     my $device = shift;
+    print "ScsiInquiry($device)\n" if ($DEBUG);
 
     my ($data, $sense) = ScsiExecute($device, pack("C x3 C x5", 0x12, 96), 96); # INQUIRE
     return undef unless defined($data);
 if (length($data) < 36) {
-    print "ScsiExecute failure: $data\n";
+    print "ScsiExecute failure: $data on device $device\n" if ($DEBUG);
     return undef;
 }
 
@@ -244,8 +247,14 @@ sub DoBlockDevices {
 #        }
 #        elsif ($Devices{$disk->{$k}->{major}} eq "ramdisk") {
 #        }
+#        elsif ($Devices{$disk->{$k}->{major}} eq "ramz") {
+#            delete($disk->{$k});
+#        }
         elsif ($Devices{$disk->{$k}->{major}} eq "sd") {
             GetScsiDisk($disk->{$k});
+        }
+        elsif ($Devices{$disk->{$k}->{major}} eq "virtblk") {
+            GetVirtioDisk($disk->{$k});
         }
         elsif ($Devices{$disk->{$k}->{major}} eq "xvd") {
             GetXenDisk($disk->{$k});
@@ -328,6 +337,18 @@ sub GetScsiDisk {
     $disk->{vendor} = GetFileFirst("/sys/block/$dev/device/vendor",1);
 }  # GetScsiDisk
 
+# Get all info we can find on the specified Virtio virtual device
+# GetVirtioDisk(\%disk);
+
+sub GetVirtioDisk {
+    my $disk = shift;
+    my $dev = $disk->{device};
+
+    $disk->{media} = "disk";
+    $disk->{model} = "";
+    $disk->{vendor} = "Virtio";
+}  # GetVirtioDisk
+
 # Get all info we can find on the specified Xen virtual device
 # GetXenDisk(\%disk);
 
@@ -383,7 +404,7 @@ sub GetPPath {
 sub GetScsiGeneric {
     my $sg = shift;
 
-    my @sgdevices = ScsiEnumerate();
+    my @sgdevices = ScsiEnumerateDev();
     foreach my $d (@sgdevices) {
         my $dinfo = ScsiInquiry($d);
         $sg->{$d}->{device} = $d;
@@ -486,19 +507,29 @@ sub ReadProcPartitions {
 }  # ReadProcPartitions
 
 sub ShowDisks {
-    print "Device        Addr        Size  Multipath    Host\n";
+    ($VERBOSE) ?
+        print "Device       Addr         Size  Multipath    Host\n" :
+        print "Device       Addr         Size  Vendor:Model\n";
     foreach my $k (sort keys %Disk) {
         # Skip multipath agregate devices
         next if (defined($Disk{$k}->{paths}));
         # Skip partitions
         next if (defined($Disk{$k}->{parent}));
-        printf "%-12s %-11s %5d  %-12s %-8s\n", 
-            $Disk{$k}->{device},
-            $Disk{$k}->{addr},
-            $Disk{$k}->{size},
-            $Disk{$k}->{mpath},
-            $Disk{$k}->{host},
-            ;
+        $Disk{$k}->{vendor} =~ s/\s*$//;
+        ($VERBOSE) ?
+            printf "%-12s %-11s %5d %-12s %-8s\n", 
+                $Disk{$k}->{device},
+                $Disk{$k}->{addr},
+                $Disk{$k}->{size},
+                $Disk{$k}->{mpath},
+                $Disk{$k}->{host},
+                :
+            printf "%-12s %-11s %5d  %-20s\n", 
+                $Disk{$k}->{device},
+                $Disk{$k}->{addr},
+                $Disk{$k}->{size},
+                $Disk{$k}->{vendor}.":".$Disk{$k}->{model},
+                ;
     }
 }  # ShowDisks
 
@@ -514,7 +545,7 @@ ReadProcDriverCciss(\%Disk);
 
 ShowDisks();
 
-if ($VERBOSE) {
+if ($DEBUG) {
     print "====================\nSCSI Generic\n";
     DumpScsiGeneric(1);
     print "====================\nDump \%Disk\n";
