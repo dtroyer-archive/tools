@@ -7,8 +7,8 @@
 # command	default command = sol activate
 
 ARGS="-I lanplus"
-USER="ADMIN"
-PASS="IpmiAccess4U$"
+USER=${ADMIN:-"ADMIN"}
+PASS=${PASS:-"ADMIN"}
 
 while getopts pu:x c; do
         case $c in
@@ -38,4 +38,4 @@ if [ -z "$CMD" ]; then
 	CMD="sol activate"
 fi
 
-ipmitool $ARGS -U $USER -P $PASS -H $HOST $CMD
+exec ipmitool $ARGS -U $USER -P $PASS -H $HOST $CMD
