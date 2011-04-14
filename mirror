@@ -1,0 +1,113 @@
+#/bin/bash
+# mirror - Mirror master script for Nebula
+#
+# Targets:
+#  centos - /mirror/centos - CentOS 5.5
+#  ubuntu - /mirror/ubuntu
+#  ubuntu-releases - /mirror/ubuntu-releases
+
+USER=mirror
+MIRROR=/mirror
+LOGDIR=/var/log/mirror
+
+PATH=/usr/bin:/bin
+RSYNC=/usr/bin/rsync
+
+CENTOS_SRC=rsync://mirrors.kernel.org/centos
+CENTOS_DEST=${MIRROR}/centos
+
+# Eucalyptus is not a full mirror, just the bits required buy Nebula
+EUCA2OOLS_SRC=http://www.eucalyptussoftware.com/downloads/repo/euca2ools
+EUCA2OOLS_DEST=${MIRROR}/Eucalyptus/euca2ools
+EUCA2OOLS_SOURCE_SRC=http://eucalyptussoftware.com/downloads/releases/euca2ools*.tar.gz
+EUCA2OOLS_SOURCE_DEST=${MIRROR}/Eucalyptus/euca2ools-source
+
+# Find a source mirror near you which supports rsync on
+# https://launchpad.net/ubuntu/+cdmirrors
+# rsync://<iso-country-code>.rsync.releases.ubuntu.com/releases should always work
+UBUNTU_SRC=rsync://mirrors.kernel.org/mirrors/ubuntu-releases
+UBUNTU_DEST=${MIRROR}/ubuntu-releases
+
+ID=`id | cut -f1 -d' ' | cut -f2 -d'(' | tr -d ')'`
+SU=""
+if [ "$ID" = "root" ]; then
+	SU="/bin/su - ${USER} -c"
+fi
+
+fatal() {
+  echo "$1"
+  exit 1
+}
+
+warn() {
+  echo "$1"
+}
+
+lftpget() {
+	# $1 - source
+	# $2 - dest
+	# $3 - logname
+	if [ ! -d ${2} ]; then
+		mkdir -p ${2}
+		chown -R mirror:mirror ${2}
+	fi
+	$SU "lftp -c \" \
+mirror --verbose \
+--log ${LOGDIR}/$3.log \
+${1} ${2} \
+\" "
+}
+
+mirror_centos() {
+	$SU "$RSYNC -avH --log-file=${LOGDIR}/centos.log \
+	  --include 5.5 --exclude '5*' \
+	  --exclude SRPMS --exclude '4*' --exclude '3*' --exclude '2*' \
+	  ${CENTOS_SRC} ${CENTOS_DEST}" || fatal "CentOS mirror failed from ${CENTOS_SRC}"
+}
+
+mirror_eucalyptus() {
+	lftpget ${EUCA2OOLS_SRC} ${EUCA2OOLS_DEST} euca2ools 
+	lftpget ${EUCA2OOLS_SOURCE_SRC} ${EUCA2OOLS_SOURCE_DEST} euca2ools 
+}
+
+mirror_ubuntu_releases() {
+
+	$SU "$RSYNC --verbose --recursive --times --links \
+	  --hard-links --stats \
+	  ${UBUNTU_SRC} ${MIRROR}" || fatal "Failed to rsync from ${UBUNTU_SRC}."
+}
+
+if [ ! -d ${LOGDIR} ]; then
+	warn "${LOGDIR} does not exist yet, trying to create it..."
+	mkdir -p ${LOGDIR}
+	chown mirror:mirror ${LOGDIR}
+	chmod 755 ${LOGDIR}
+fi
+
+if [ ! -d ${MIRROR} ]; then
+	warn "${MIRROR} does not exist yet, trying to create it..."
+	mkdir -p ${MIRROR} || fatal "Creation of ${MIRROR} failed."
+fi
+
+case $1 in
+    centos)
+	mirror_centos
+	;;
+    eucalyptus)
+	mirror_eucalyptus
+	;;
+    ubuntu)
+	$SU "/usr/bin/apt-mirror"
+	;;
+    ubuntu-releases)
+	mirror_ubuntu_releases
+	;;
+    *)
+	echo "unknown arg"
+	echo "Select one of:"
+	echo "  centos"
+	echo "  ubuntu"
+	echo "  ubuntu-releases"
+	;;
+esac
+

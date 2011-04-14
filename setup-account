@@ -1,0 +1,8 @@
+#!/bin/bash
+# setup-account - Do the account initialization stuff on a list of hosts
+
+for i in "$@"; do
+	ssh-mkkeys $i
+	scp -p $HOME/dist.tar $i:
+	ssh $i tar xf dist.tar
+done
