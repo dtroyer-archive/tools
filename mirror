@@ -29,9 +29,9 @@ UBUNTU_SRC=rsync://mirrors.kernel.org/mirrors/ubuntu-releases
 UBUNTU_DEST=${MIRROR}/ubuntu-releases
 
 ID=`id | cut -f1 -d' ' | cut -f2 -d'(' | tr -d ')'`
-SU=""
 if [ "$ID" = "root" ]; then
-	SU="/bin/su - ${USER} -c"
+	/bin/su - ${USER} -c "$0 $@"
+	exit
 fi
 
 fatal() {
@@ -51,18 +51,18 @@ lftpget() {
 		mkdir -p ${2}
 		chown -R mirror:mirror ${2}
 	fi
-	$SU "lftp -c \" \
+	lftp -c \" \
 mirror --verbose \
 --log ${LOGDIR}/$3.log \
 ${1} ${2} \
-\" "
+\"
 }
 
 mirror_centos() {
-	$SU "$RSYNC -avH --log-file=${LOGDIR}/centos.log \
+	$RSYNC -avH --log-file=${LOGDIR}/centos.log \
 	  --include 5.5 --exclude '5*' \
 	  --exclude SRPMS --exclude '4*' --exclude '3*' --exclude '2*' \
-	  ${CENTOS_SRC} ${CENTOS_DEST}" || fatal "CentOS mirror failed from ${CENTOS_SRC}"
+	  ${CENTOS_SRC} ${CENTOS_DEST} || fatal "CentOS mirror failed from ${CENTOS_SRC}"
 }
 
 mirror_eucalyptus() {
@@ -72,9 +72,9 @@ mirror_eucalyptus() {
 
 mirror_ubuntu_releases() {
 
-	$SU "$RSYNC --verbose --recursive --times --links \
+	$RSYNC --verbose --recursive --times --links \
 	  --hard-links --stats \
-	  ${UBUNTU_SRC} ${MIRROR}" || fatal "Failed to rsync from ${UBUNTU_SRC}."
+	  ${UBUNTU_SRC} ${MIRROR} || fatal "Failed to rsync from ${UBUNTU_SRC}."
 }
 
 if [ ! -d ${LOGDIR} ]; then
@@ -97,7 +97,7 @@ case $1 in
 	mirror_eucalyptus
 	;;
     ubuntu)
-	$SU "/usr/bin/apt-mirror"
+	/usr/bin/apt-mirror
 	;;
     ubuntu-releases)
 	mirror_ubuntu_releases
