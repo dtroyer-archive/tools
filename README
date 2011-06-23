@@ -4,9 +4,6 @@ config-root - Configure root account for per-login history
 
 config-su - Configure su: enable pam_wheel for root access
 
-config-sudo - Configure sudo: get default sudoers file, set up log file,
-	set up log file rotation
-
 diskmap - Map physical/logical disks
 
 icon - IPMI console wrapper for ipmitool
