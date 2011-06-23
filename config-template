@@ -1,6 +1,5 @@
 #!/bin/bash
 # config-template - Config script template
-# $Id: config-template 389 2008-04-28 17:46:31Z troyerdl $
 
 PROG=`basename $0`
 DIR=`dirname $0`

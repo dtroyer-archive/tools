@@ -1,6 +1,5 @@
 #!/bin/bash
 # config-root - Configure root account
-# $Id: config-root 249 2007-08-01 18:31:24Z troyerdl $
 
 PROG=`basename $0`
 DIR=`dirname $0`

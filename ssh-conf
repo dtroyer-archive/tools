@@ -1,6 +1,5 @@
 #!/bin/bash
 # ssh-conf - Configure SSH and generate keys
-# $Id: ssh-conf 109 2006-09-14 21:12:52Z troyerdl $
 #
 # ssh-conf [-f] [-t type]
 # -f	        removes existing keys

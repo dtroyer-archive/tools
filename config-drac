@@ -1,6 +1,5 @@
 #!/bin/bash
 # config-drac - Configure DRAC from OS
-# $Id: config-drac 556 2009-07-09 22:15:53Z troyerdl $
 
 PROG=`basename $0`
 DIR=`dirname $0`

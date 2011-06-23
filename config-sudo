@@ -1,6 +1,5 @@
 #!/bin/bash
 # config-sudo - Configure sudo log rotation
-# $Id: config-sudo 354 2008-02-25 00:51:55Z troyerdl $
 
 PROG=`basename $0`
 DIR=`dirname $0`

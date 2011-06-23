@@ -1,6 +1,5 @@
 #!/bin/bash
 # config-su - Configure su
-# $Id: config-su 251 2007-08-02 22:21:43Z troyerdl $
 
 PROG=`basename $0`
 DIR=`dirname $0`

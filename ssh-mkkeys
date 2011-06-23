@@ -1,6 +1,5 @@
 #!/bin/bash
 # ssh-mkkeys - Manage remote SSH keys
-# $Id: ssh-mkkeys 555 2009-07-09 16:51:09Z troyerdl $
 #
 # ssh-mkkeys [-f] [-h hostfile] [-g] [host ...]
 # -d            force DSA keys on remote (overrides -t)

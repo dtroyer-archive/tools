@@ -4,8 +4,6 @@
     if [ ! -z "$xSH" -a -z "$xxxx" ]; then xxxx=1; export xxxx; eval 'exec $xSH $0 "$@"'; fi
 
 # rxt [-d xx:0] [-l username] [-f fgcolor] [-b bgcolor] host [cmd line]
-# $Id: rxt 5 2006-03-21 21:04:39Z troyerdl $
-# 'The Sprint version'
 #
 # rxt [-d display] [-f font] [-b bgcolor] [-l login]
 # -d display    Set X11 display

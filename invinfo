@@ -1,6 +1,5 @@
 #!/bin/bash
 # invinfo - Get inventory information
-# $Id: invinfo 380 2008-04-24 13:47:30Z troyerdl $
 
 # Configuration
 
