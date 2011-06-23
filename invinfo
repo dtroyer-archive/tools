@@ -22,11 +22,13 @@ IP=/sbin/ip
 # NUMCPU
 
 GetCPUInfo() {
-    CPUSPEED=`sed -ne '/cpu MHz/s/.*: \(.*\)$/\1/p' /proc/cpuinfo | uniq`
-    CPUVENDOR=`sed -ne '/vendor_id/s/.*: \(.*\)$/\1/p' /proc/cpuinfo | uniq`
+    CPUMODEL=`sed -ne '/model name/s/.*: \(.*\)$/\1/p' /proc/cpuinfo | head -1`
+    CPUSPEED=`sed -ne '/cpu MHz/s/.*: \(.*\)$/\1/p' /proc/cpuinfo | head -1`
+    CPUVENDOR=`sed -ne '/vendor_id/s/.*: \(.*\)$/\1/p' /proc/cpuinfo | head -1`
     NUMCPU=`sed -ne '/processor/s/.*: \(.*\)$/\1/p' /proc/cpuinfo | wc -l | awk '{ print $1 }' `
 
-    echo "cpu_speed=$CPUSPEED" >$1.cpu
+    echo "cpu_model=$CPUMODEL" >$1.cpu
+    echo "cpu_speed=$CPUSPEED" >>$1.cpu
     echo "cpu_vendor=$CPUVENDOR" >>$1.cpu
     echo "cpu_num=$NUMCPU" >>$1.cpu
 }
@@ -39,27 +41,11 @@ GetDiskInfo() {
 
 GetDMIInfo() {
     if [ -x $DMIDECODE -a $EUID = 0 ]; then
-	$DMIDECODE | awk '
-		BEGIN		{ }
-		/./		{ h = "" }
-		/DMI type 0,/,/DMI type 1,/ { h = "bios" }
-		/DMI type 1,/,/DMI type 2,/ { h = "system" }
-		/DMI type 2,/,/DMI type 3,/ { h = "baseboard" }
-		/DMI type 3,/,/DMI type 4,/ { h = "chassis" }
-		/DMI type 4,/,/DMI type 5,/ { h = "" }
-		/DMI type 5,/,/DMI type 6,/ { h = "" }
-		/Family/	{ if (h != "") { split($0,d,":"); print "dmi_" h "_Family=\"" gensub(/^ */,"","g",d[2]) "\"" } }
-		/Manufacturer/	{ if (h != "") { split($0,d,":"); print "dmi_" h "_Manufacturer=\"" gensub(/^ */,"","g",d[2]) "\"" } }
-		/Product/	{ if (h != "") { split($0,d,":"); print "dmi_" h "_Product=\"" gensub(/^ */,"","g",d[2]) "\"" } }
-		/Serial Number/	{ if (h != "") { split($0,d,":"); print "dmi_" h "_SerialNo=\"" gensub(/^ */,"","g",d[2]) "\"" } }
-		/Type/		{ if (h != "") { split($0,d,":"); print "dmi_" h "_Type=\"" gensub(/^ */,"","g",d[2]) "\"" } }
-		/UUID/		{ if (h != "") { split($0,d,":"); print "dmi_" h "_UUID=\"" gensub(/^ */,"","g",d[2]) "\"" } }
-		/Vendor/	{ if (h == "system") { split($0,d,":"); print "dmi_" h "_Manufacturer=\"" gensub(/^ */,"","g",d[2]) "\"" } 
-				  else
-				  if (h != "") { split($0,d,":"); print "dmi_" h "_Vendor=\"" gensub(/^ */,"","g",d[2]) "\"" } }
-		/Version/	{ if (h != "") { split($0,d,":"); print "dmi_" h "_Version=\"" gensub(/^ */,"","g",d[2]) "\"" } }
-		END		{ }
-	' >$1.dmi
+	echo >$1.dmi
+	DMI=`$DMIDECODE -s 2>&1 | grep '^ '`
+        for i in $DMI; do 
+		echo dmi_$i=\'`$DMIDECODE -s $i`\' | sed 's/[-]/_/g' >>$1.dmi
+	done
     fi
 }
 
@@ -71,18 +57,18 @@ GetMemoryInfo() {
 
 GetNetInfo() {
     if [ -x $IP ]; then
-	$IP addr | awk '
-		BEGIN		{ ifc = "" ; ipv4 = "" }
-		/^[0-9]:/	{ 
-				  if (ipv4 != "")
+	$IP addr show | awk '
+		BEGIN		{ ifc = ""; ipv4 = ""; mac = ""; state = "DOWN" }
+		/^[0-9]+:/	{ 
+				  if (mac != "")
 				    print "net_" ifc "=" ipv4 "," mac "," state ;
-				  split($2,d,":"); ifc = d[1]; flags = $3; ipv4 = ""; state = ""; mac = "";
+				  split($2,d,":"); ifc = d[1]; flags = $3; ipv4 = ""; state = "DOWN"; mac = "";
 				}
 		/link\//	{ mac = $2 }
 		/inet /		{ ipv4 = $2; }
-		$3 ~ /UP/	{ state = "UP" }
+		$3 ~ /LOWER_UP/	{ state = "UP" }
 		END		{
-				  if (ipv4 != "")
+				  if (mac != "")
 				    print "net_" ifc "=" ipv4 "," mac "," state "\n";
 				}
 	' >$1.net
@@ -253,14 +239,13 @@ fi
 if [ -d /sys/bus/xen/drivers/vif ]; then
     # Xen DomU
     GetXenInfo
-else
-    # We have real hardware to discover
-    GetDMIInfo $TMPFILE
-    . $TMPFILE.dmi
 fi
+# We have real hardware to discover
+GetDMIInfo $TMPFILE
+. $TMPFILE.dmi
 
-MFG=${MFG:-$dmi_system_Manufacturer}
-MFG=${MFG:-$dmi_baseboard_Manufacturer}
+MFG=${MFG:-$dmi_system_manufacturer}
+MFG=${MFG:-$dmi_baseboard_manufacturer}
 # Normalize MFG
 MFG=`echo $MFG | sed -ne '
 	/Dell/s/^.*$/Dell/;
@@ -269,13 +254,13 @@ MFG=`echo $MFG | sed -ne '
 	p;
 '`
 
-SN=${SN:-$dmi_system_SerialNo}
+SN=${SN:-$dmi_system_serial_number}
 
 GetPCIInfo $TMPFILE
 . $TMPFILE.pci
 
 # Hack to check for 2950/DRAC5
-if [ "$dmi_system_Product" = "PowerEdge 2950" ]; then
+if [ "$dmi_system_product_name" = "PowerEdge 2950" ]; then
 	rcon=DRAC5
 	echo "rcon=$rcon"
 fi
@@ -316,4 +301,4 @@ for i in os cpu dmi pci net route; do
 done
 
 # Clean up after ourselves
-#rm $TMPFILE.*
+rm $TMPFILE.*
