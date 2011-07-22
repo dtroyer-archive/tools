@@ -1,0 +1,99 @@
+#!/bin/bash
+# config-postfix - Configure Postfix for common uses
+
+# This simple configuration script for Postfix can set up a leaf node
+# with an optional relay host, and a simple relayhost with optional
+# masquerade of all outbound mail.
+
+# All configurations get some basic Postfix security settings:
+# - simplified banner with no identifying text
+# - VRFY disabled
+
+# The leaf node configuration defaults to sending unqualified mail with 
+# the full local hostname, use -H to use just the domain.
+
+# config-postfix [-r relayhost] [-H] host domain 
+# config-postfix [-r relayhost] [-H] [-m domaim] -R networks host domain 
+
+# -R 		configure for relaying
+# -r 		relayhost destination for outbound mail
+# -m domain	Masquerade all outbound mail as this domain 
+# -H		Hide hostname in locally-generated mail (myorigin)
+
+usage() {
+    echo "$0 Usage:"
+    echo "$0 [-r relayhost] [-m domain] [-H] host domain"
+    echo "$0 [-r relayhost] [-m domain] [-H] -R networks host domain"
+    echo ""
+    echo "-R 		configure for relaying"
+    echo "-r 		relayhost destination for outbound mail"
+    echo "-m domain	Masquerade all outbound mail as this domain "
+    echo "-H		Hide hostname in locally-generated mail (myorigin)"
+    exit
+}  # usage
+
+ORIGIN='$myhostname'
+
+while getopts Hhm:R:r: c; do
+    case $c in
+        H)  ORIGIN='$mydomain'
+            ;;
+        h)  usage
+            exit
+            ;;
+	m)  MASQDOMAIN=$OPTARG
+            ;;
+        R)  RELAY=$OPTARG
+            ;;
+        r)  RELAYHOST=$OPTARG
+            ;;
+    esac
+done
+shift `expr $OPTIND - 1`
+
+if [ -z "$2" ]; then
+    usage
+    exit
+fi
+
+HOSTNAME=$1
+DOMAIN=$2
+
+# Save original 
+if [ ! -e /tmp/postfix-begin ]; then
+    postconf -n >/tmp/postfix-begin
+fi
+
+postconf -e "myhostname = $HOSTNAME.$DOMAIN"
+postconf -e "mydomain = $DOMAIN"
+postconf -e "myorigin = $ORIGIN"
+postconf -e 'append_dot_mydomain = yes'
+postconf -e 'smtpd_banner = $myhostname ESMTP'
+postconf -e 'disable_vrfy_command = yes'
+
+# uncomment the top mydestination line (and comment the 2nd one) if your
+# relay requires masquerating that removes the hostname from the address
+#postconf -e 'mydestination = $myhostname, localhost.$mydomain, localhost, $mydomain'
+postconf -e 'mydestination = $myhostname, localhost.$mydomain, localhost'
+
+if [ -n "$RELAY" ]; then
+    # Do relay config
+    postconf -e 'inet_interfaces = $myhostname, localhost'
+    postconf -e "mynetworks = $RELAY"
+else
+    postconf -e 'inet_interfaces = localhost'
+fi
+
+if [ -n "$MASQDOMAIN" ]; then
+    # Add masq domain
+    postconf -e "masquerade_domains = $MASQDOMAIN"
+fi
+
+if [ -n "$RELAYHOST" ]; then
+    # Add relayhost
+    postconf -e "relayhost = $RELAYHOST"
+fi
+
+# Restart to make it all effective
+service postfix restart
+
