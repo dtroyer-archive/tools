@@ -1,4 +1,4 @@
-# dtroyer profile
+# dtroyer bash_profile
 
 PATH=$HOME/bin:$PATH
 PS1="\h $ "
@@ -13,3 +13,13 @@ fi
 #ssh-agent -s >.ssh_agent
 #. .ssh_agent
 ##ssh-add .ssh/id_dt
+
+# include .bashrc if it exists
+if [ -f "$HOME/.bashrc" ]; then
+    . "$HOME/.bashrc"
+fi
+
+# set PATH so it includes user's private bin if it exists
+if [ -d "$HOME/bin" ] ; then
+    PATH="$HOME/bin:$PATH"
+fi
