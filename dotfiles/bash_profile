@@ -1,0 +1,15 @@
+# dtroyer profile
+
+PATH=$HOME/bin:$PATH
+PS1="\h $ "
+SUDO_PS1="\h # "
+export PS1 SUDO_PS1
+
+if [ -f $HOME/.aliases ]; then
+	. $HOME/.aliases
+fi
+
+# ssh
+#ssh-agent -s >.ssh_agent
+#. .ssh_agent
+##ssh-add .ssh/id_dt

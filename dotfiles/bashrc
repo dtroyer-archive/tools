@@ -1,0 +1,22 @@
+# .bashrc
+# $Id: bashrc 5 2006-03-21 21:04:39Z troyerdl $
+
+BASH_ENV=$HOME/.bashrc
+
+HISTCONTROL=ignoredups:ignorespace
+
+# Append to history file
+shopt -s histappend
+
+# Source global definitions
+if [ -f /etc/bashrc ]; then
+        . /etc/bashrc
+fi
+
+# local functions
+
+# Setup bash-specific prompt
+PS1="\u@\h:\w \$ "
+PS2="> "
+SUDO_PS1="\u@\h:\w \# "
+export PS1 PS2 SUDO_PS1

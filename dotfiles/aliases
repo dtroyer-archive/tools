@@ -1,0 +1,40 @@
+# dtroyer aliases
+# $Id: aliases 16 2008-06-30 15:48:07Z troyerdl $
+
+# OS-specific aliases
+case `uname` in
+    CYGWIN_NT*)
+        alias root=""
+        alias df="df -m"
+        ;;
+    AIX)
+        alias root="/usr/local/bin/sudo -u root ~/.profile-root exec"
+        alias df="df -m"
+        ;;
+    Darwin)
+        alias root="/usr/bin/sudo -s"
+        alias df="df -m"
+        ;;
+    HP-UX)
+        alias root="/usr/local/bin/sudo -u root ~/.profile-root exec"
+        alias df="bdf"
+        ;;
+    Linux)
+        alias root="/usr/bin/sudo -u root ~/.profile-root exec"
+        alias df="df -m"
+	alias linuxdepot="/usr/bin/sudo -H -u linuxdepot bash"
+        ;;
+    SunOS)
+        alias root="/usr/local/bin/sudo -u root ~/.profile-root exec"
+        alias df="df -k"
+        ;;
+esac
+
+alias cpan="perl -MCPAN -e shell"
+alias killagent='kill $SSH_AGENT_PID'   
+alias ll='ls -l'
+alias ls='ls'
+alias lsd="ll | grep '^d'"
+alias psg="ps -ef | grep $1"
+alias rhnget="http_proxy=http://internet.ps.net https_proxy=http://internet.ps.net wget -N --continue "
+alias pwget="http_proxy=http://internet.ps.net https_proxy=http://internet.ps.net wget -N --continue "

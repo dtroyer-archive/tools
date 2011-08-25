@@ -1,0 +1,26 @@
+# allow bold colors - necessary for some reason
+attrcolor b ".I"
+# tell screen how to set colors. AB = background, AF=foreground
+termcapinfo xterm 'Co#256:AB=\E[48;5;%dm:AF=\E[38;5;%dm'
+# erase background with current bg color
+#defbce "on"
+
+startup_message off
+
+caption always "%{= kW}%-w%{= bW}%n %t%{-}%+w %-=%{= kR}%H  "
+
+#hardstatus alwayslastline "%{= kW}%-=%{= kG}Sess:%u%{= kW} %t | %{= kG} Load:%{= kW} %l |%{= kG} Up: %{= kW}%1` | %{= kG}Bat: %{= kW}%2` | %m/%d %C %A"
+
+#vbell off
+
+#Backticks to display information in status bar
+#backtick 1 60 60 $HOME/bin/get_uptime
+#backtick 2 60 60 $HOME/bin/get_battery
+#backtick 5 60 60 $HOME/bin/get_sessionname
+
+screen -t shell 1 bash -l
+
+multiuser on
+#acladd elog
+
+defmode 0662
